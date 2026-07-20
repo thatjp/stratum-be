@@ -128,3 +128,75 @@ CREATE TABLE IF NOT EXISTS device_tokens (
   platform   TEXT NOT NULL DEFAULT 'ios',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Artifacts: add quiz-related columns (idempotent)
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS source       TEXT NOT NULL DEFAULT 'session'
+  CHECK (source IN ('session','quiz'));
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS expires_at   TIMESTAMPTZ;
+ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS quiz_session_id UUID;
+
+-- Conversations
+CREATE TABLE IF NOT EXISTS conversations (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  collection_id       UUID REFERENCES collections(id) ON DELETE SET NULL,
+  scope               TEXT NOT NULL DEFAULT 'global'
+    CHECK (scope IN ('global','collection','nugget')),
+  mode                TEXT NOT NULL DEFAULT 'discussion'
+    CHECK (mode IN ('socratic','discussion','explain','quiz')),
+  title               TEXT,
+  synopsis            TEXT,
+  synopsis_updated_at TIMESTAMPTZ,
+  message_count       INT NOT NULL DEFAULT 0,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS conversations_user_id_idx ON conversations(user_id);
+CREATE INDEX IF NOT EXISTS conversations_collection_id_idx ON conversations(collection_id);
+
+-- Messages
+CREATE TABLE IF NOT EXISTS messages (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role            TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  content         TEXT NOT NULL,
+  token_count     INT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS messages_conversation_id_idx ON messages(conversation_id);
+
+-- Quiz sessions
+CREATE TABLE IF NOT EXISTS quiz_sessions (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  collection_id        UUID REFERENCES collections(id) ON DELETE SET NULL,
+  mode                 TEXT NOT NULL DEFAULT 'inline'
+    CHECK (mode IN ('inline','final')),
+  question_count       INT NOT NULL DEFAULT 0,
+  score                INT NOT NULL DEFAULT 0,
+  max_score            INT NOT NULL DEFAULT 0,
+  performance_overview TEXT,
+  weak_nugget_ids      UUID[] NOT NULL DEFAULT '{}',
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at         TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS quiz_sessions_user_id_idx ON quiz_sessions(user_id);
+
+-- Quiz questions
+CREATE TABLE IF NOT EXISTS quiz_questions (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  quiz_session_id UUID NOT NULL REFERENCES quiz_sessions(id) ON DELETE CASCADE,
+  nugget_id       UUID REFERENCES nuggets(id) ON DELETE SET NULL,
+  artifact_id     UUID REFERENCES artifacts(id) ON DELETE SET NULL,
+  question        TEXT NOT NULL,
+  expected_answer TEXT NOT NULL,
+  user_answer     TEXT,
+  is_correct      BOOLEAN,
+  feedback        TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS quiz_questions_quiz_session_id_idx ON quiz_questions(quiz_session_id);

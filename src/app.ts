@@ -9,6 +9,8 @@ import { collectionsRouter } from './routes/collections';
 import { sessionsRouter } from './routes/sessions';
 import { artifactsRouter } from './routes/artifacts';
 import { reviewRouter } from './routes/review';
+import { conversationsRouter } from './routes/conversations';
+import { quizRouter } from './routes/quiz';
 
 const app = express();
 
@@ -27,7 +29,9 @@ app.use('/api/auth',        authLimiter, authRouter);
 app.use('/api/collections', apiLimiter, requireAuth, collectionsRouter);
 app.use('/api/sessions',    apiLimiter, requireAuth, sessionsRouter);
 app.use('/api/artifacts',   apiLimiter, requireAuth, artifactsRouter);
-app.use('/api/review',      apiLimiter, requireAuth, reviewRouter);
+app.use('/api/review',         apiLimiter, requireAuth, reviewRouter);
+app.use('/api/conversations',  apiLimiter, requireAuth, conversationsRouter);
+app.use('/api/quiz',           apiLimiter, requireAuth, quizRouter);
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
