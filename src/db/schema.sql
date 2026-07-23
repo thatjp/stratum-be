@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS collections (
 
 CREATE INDEX IF NOT EXISTS collections_user_id_idx ON collections(user_id);
 
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS archived_at    TIMESTAMPTZ;
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS ghost_synopsis TEXT;
+
 -- Sessions
 CREATE TABLE IF NOT EXISTS sessions (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -142,18 +145,30 @@ CREATE TABLE IF NOT EXISTS conversations (
   collection_id       UUID REFERENCES collections(id) ON DELETE SET NULL,
   scope               TEXT NOT NULL DEFAULT 'global'
     CHECK (scope IN ('global','collection','nugget')),
-  mode                TEXT NOT NULL DEFAULT 'discussion'
-    CHECK (mode IN ('socratic','discussion','explain','quiz')),
+  socratic_enabled    BOOLEAN NOT NULL DEFAULT TRUE,
   title               TEXT,
   synopsis            TEXT,
   synopsis_updated_at TIMESTAMPTZ,
   message_count       INT NOT NULL DEFAULT 0,
+  quiz_state          JSONB,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS conversations_user_id_idx ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS conversations_collection_id_idx ON conversations(collection_id);
+
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS archived_at    TIMESTAMPTZ;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ghost_synopsis TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_titled    BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Migrate existing conversations: drop mode column if it exists, add new columns
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS socratic_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS quiz_state JSONB;
+DO $$ BEGIN
+  ALTER TABLE conversations DROP COLUMN IF EXISTS mode;
+EXCEPTION WHEN others THEN null;
+END $$;
 
 -- Messages
 CREATE TABLE IF NOT EXISTS messages (
@@ -162,8 +177,11 @@ CREATE TABLE IF NOT EXISTS messages (
   role            TEXT NOT NULL CHECK (role IN ('user','assistant')),
   content         TEXT NOT NULL,
   token_count     INT,
+  metadata        JSONB,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata JSONB;
 
 CREATE INDEX IF NOT EXISTS messages_conversation_id_idx ON messages(conversation_id);
 
@@ -200,3 +218,18 @@ CREATE TABLE IF NOT EXISTS quiz_questions (
 );
 
 CREATE INDEX IF NOT EXISTS quiz_questions_quiz_session_id_idx ON quiz_questions(quiz_session_id);
+
+-- Token usage log — one row per Claude API call for cost tracking
+CREATE TABLE IF NOT EXISTS token_usage (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
+  operation       TEXT NOT NULL,
+  model           TEXT NOT NULL,
+  input_tokens    INT  NOT NULL DEFAULT 0,
+  output_tokens   INT  NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS token_usage_user_id_idx     ON token_usage(user_id);
+CREATE INDEX IF NOT EXISTS token_usage_created_at_idx  ON token_usage(user_id, created_at);

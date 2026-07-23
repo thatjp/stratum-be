@@ -69,6 +69,11 @@ authRouter.post('/refresh', asyncHandler(async (req, res) => {
   res.json({ user, token: newAccessToken, refreshToken: newRefreshToken });
 }));
 
+authRouter.post('/logout', requireAuth, asyncHandler(async (_req, res) => {
+  await tokenStore.deleteUserRefreshTokens(res.locals.userId!);
+  res.status(204).send();
+}));
+
 authRouter.get('/me', requireAuth, asyncHandler(async (_req, res) => {
   const user = await store.getUserById(res.locals.userId!);
   if (!user) return sendError(res, 401, 'UNAUTHORIZED', 'Unauthorized');

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import * as store from '../store/collections';
 import * as sessionStore from '../store/sessions';
 import * as reviewStore from '../store/review';
+import * as convService from '../services/conversation';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { sendError } from '../middleware/sendError';
 
@@ -55,4 +56,31 @@ collectionsRouter.get('/:id/sessions', asyncHandler(async (req, res) => {
   if (!collection) return sendError(res, 404, 'NOT_FOUND', 'Collection not found');
   const sessions = await reviewStore.getSessionsForCollection(id, res.locals.userId!);
   res.json({ sessions });
+}));
+
+// Archive (soft delete) or hard delete a collection
+collectionsRouter.delete('/:id', asyncHandler(async (req, res) => {
+  const id   = String(req.params.id);
+  const hard = req.query.hard === 'true';
+  const userId = res.locals.userId!;
+
+  const collection = await store.getCollectionById(id, userId);
+  if (!collection) return sendError(res, 404, 'NOT_FOUND', 'Collection not found');
+
+  if (hard) {
+    const deleted = await store.hardDeleteCollection(id, userId);
+    if (!deleted) return sendError(res, 404, 'NOT_FOUND', 'Collection not found');
+    return res.status(204).send();
+  }
+
+  // Generate ghost synopsis before archiving
+  const ghost = await convService.generateCollectionGhost({
+    title:        collection.title,
+    userId,
+    collectionId: id,
+  });
+  const archived = await store.archiveCollection(id, userId, ghost);
+  if (!archived) return sendError(res, 404, 'NOT_FOUND', 'Collection not found');
+  convService.invalidateGhostCache(userId);
+  res.status(204).send();
 }));

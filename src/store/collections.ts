@@ -33,24 +33,78 @@ function rowToCollection(row: Record<string, unknown>): Collection {
 export async function getCollections(userId: string): Promise<Collection[]> {
   const { rows } = await pool.query(
     `SELECT c.*,
-       (SELECT count(*) FROM sessions s WHERE s.collection_id = c.id)::int AS session_count,
-       (SELECT count(*) FROM nuggets n WHERE n.collection_id = c.id)::int AS nugget_count,
-       (SELECT max(s.started_at) FROM sessions s WHERE s.collection_id = c.id) AS last_session_at
+            COALESCE(s.session_count, 0)::int AS session_count,
+            COALESCE(n.nugget_count, 0)::int  AS nugget_count,
+            s.last_session_at
      FROM collections c
-     WHERE c.user_id = $1
+     LEFT JOIN (
+       SELECT collection_id,
+              COUNT(*)::int        AS session_count,
+              MAX(started_at)      AS last_session_at
+       FROM sessions
+       GROUP BY collection_id
+     ) s ON s.collection_id = c.id
+     LEFT JOIN (
+       SELECT collection_id, COUNT(*)::int AS nugget_count
+       FROM nuggets
+       GROUP BY collection_id
+     ) n ON n.collection_id = c.id
+     WHERE c.user_id = $1 AND c.archived_at IS NULL
      ORDER BY c.updated_at DESC`,
     [userId],
   );
   return rows.map(rowToCollection);
 }
 
+export async function archiveCollection(
+  id: string,
+  userId: string,
+  ghostSynopsis: string,
+): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `UPDATE collections SET archived_at = NOW(), ghost_synopsis = $1
+     WHERE id = $2 AND user_id = $3 AND archived_at IS NULL`,
+    [ghostSynopsis, id, userId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function hardDeleteCollection(id: string, userId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `DELETE FROM collections WHERE id = $1 AND user_id = $2`,
+    [id, userId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function getArchivedCollectionGhosts(userId: string): Promise<Array<{ title: string; ghostSynopsis: string }>> {
+  const { rows } = await pool.query(
+    `SELECT title, ghost_synopsis FROM collections
+     WHERE user_id = $1 AND archived_at IS NOT NULL AND ghost_synopsis IS NOT NULL`,
+    [userId],
+  );
+  return rows.map(r => ({ title: r.title as string, ghostSynopsis: r.ghost_synopsis as string }));
+}
+
 export async function getCollectionById(id: string, userId: string): Promise<Collection | undefined> {
   const { rows } = await pool.query(
     `SELECT c.*,
-       (SELECT count(*) FROM sessions s WHERE s.collection_id = c.id)::int AS session_count,
-       (SELECT count(*) FROM nuggets n WHERE n.collection_id = c.id)::int AS nugget_count,
-       (SELECT max(s.started_at) FROM sessions s WHERE s.collection_id = c.id) AS last_session_at
+            COALESCE(s.session_count, 0)::int AS session_count,
+            COALESCE(n.nugget_count, 0)::int  AS nugget_count,
+            s.last_session_at
      FROM collections c
+     LEFT JOIN (
+       SELECT collection_id,
+              COUNT(*)::int        AS session_count,
+              MAX(started_at)      AS last_session_at
+       FROM sessions
+       GROUP BY collection_id
+     ) s ON s.collection_id = c.id
+     LEFT JOIN (
+       SELECT collection_id, COUNT(*)::int AS nugget_count
+       FROM nuggets
+       GROUP BY collection_id
+     ) n ON n.collection_id = c.id
      WHERE c.id = $1 AND c.user_id = $2`,
     [id, userId],
   );

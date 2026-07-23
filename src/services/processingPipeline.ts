@@ -16,7 +16,13 @@ export async function processCapture(captureId: string): Promise<void> {
 
   const capture = rows[0];
   if (!capture) {
-    console.error(`processCapture: capture ${captureId} not found`);
+    console.error({ event: 'process_capture_not_found', captureId });
+    return;
+  }
+
+  // Idempotency guard — if already processed or currently processing by another worker, skip
+  if (!['pending', 'failed'].includes(capture.processing_status as string)) {
+    console.log({ event: 'process_capture_skipped', captureId, status: capture.processing_status });
     return;
   }
 
@@ -31,7 +37,7 @@ export async function processCapture(captureId: string): Promise<void> {
 
     const nuggets = await extractNuggets(text, capture.intent as string);
 
-    for (const nuggetData of nuggets) {
+    await Promise.all(nuggets.map(async (nuggetData) => {
       const nugget = await nuggetStore.createNugget({
         captureId,
         collectionId: capture.collection_id as string,
@@ -41,16 +47,16 @@ export async function processCapture(captureId: string): Promise<void> {
         confidence:   nuggetData.confidence,
       });
 
-      for (const artifactData of nuggetData.artifacts) {
-        await nuggetStore.createArtifact({
+      await Promise.all(nuggetData.artifacts.map((artifactData) =>
+        nuggetStore.createArtifact({
           nuggetId: nugget.id,
           userId:   capture.user_id as string,
           kind:     artifactData.kind,
           front:    artifactData.front,
           back:     artifactData.back,
-        });
-      }
-    }
+        }),
+      ));
+    }));
 
     await captureStore.updateCaptureStatus(captureId, 'done');
 
@@ -61,9 +67,9 @@ export async function processCapture(captureId: string): Promise<void> {
       [capture.session_id],
     );
 
-    console.log(`processCapture: ${nuggets.length} nuggets extracted from capture ${captureId}`);
+    console.log({ event: 'process_capture_done', captureId, nuggetCount: nuggets.length });
   } catch (err) {
-    console.error(`processCapture: failed for capture ${captureId}`, err);
+    console.error({ event: 'process_capture_failed', captureId, err: String(err) });
     await captureStore.updateCaptureStatus(captureId, 'failed');
   }
 }

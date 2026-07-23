@@ -9,7 +9,9 @@ import { sendError } from '../middleware/sendError';
 
 export const sessionsRouter = Router();
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+// Files are held in memory until the request completes — keep the limit tight.
+// Move to disk/object-storage streaming if uploads grow beyond ~10MB regularly.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 sessionsRouter.get('/:id/status', asyncHandler(async (req, res) => {
   const id = String(req.params.id);
@@ -45,8 +47,8 @@ sessionsRouter.post('/:id/captures', upload.single('file'), asyncHandler(async (
 
   // Fire and forget — process in background, don't block the response
   setImmediate(() => {
-    processCapture(capture.id).catch((err) =>
-      console.error('Background processCapture error:', err),
+    processCapture(capture.id).catch((err: unknown) =>
+      console.error({ event: 'process_capture_failed', captureId: capture.id, sessionId: id, err: String(err) }),
     );
   });
 }));
