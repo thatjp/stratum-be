@@ -43,3 +43,27 @@ export async function getUserById(id: string): Promise<PublicUser | undefined> {
   );
   return rows[0] ? rowToUser(rows[0]) : undefined;
 }
+
+export async function updateUser(
+  id: string,
+  fields: { firstName?: string; lastName?: string; email?: string },
+): Promise<PublicUser | undefined> {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  let i = 1;
+  if (fields.firstName !== undefined) { sets.push(`first_name = trim($${i++})`); vals.push(fields.firstName); }
+  if (fields.lastName  !== undefined) { sets.push(`last_name  = trim($${i++})`); vals.push(fields.lastName); }
+  if (fields.email     !== undefined) { sets.push(`email      = lower(trim($${i++}))`); vals.push(fields.email); }
+  if (!sets.length) return getUserById(id);
+  vals.push(id);
+  const { rows } = await pool.query(
+    `UPDATE users SET ${sets.join(', ')} WHERE id = $${i} RETURNING id, email, first_name, last_name`,
+    vals,
+  );
+  return rows[0] ? rowToUser(rows[0]) : undefined;
+}
+
+export async function deleteUser(id: string): Promise<boolean> {
+  const { rowCount } = await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+  return (rowCount ?? 0) > 0;
+}

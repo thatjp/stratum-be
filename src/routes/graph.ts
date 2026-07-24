@@ -16,11 +16,12 @@ type NodeType =
   | 'nugget';
 
 interface GraphNode {
-  id:        string;
-  type:      NodeType;
-  label:     string;
-  synopsis:  string | null;
-  createdAt: string;
+  id:           string;
+  type:         NodeType;
+  label:        string;
+  synopsis:     string | null;
+  createdAt:    string;
+  collectionId: string | null;
 }
 
 interface GraphEdge {
@@ -150,7 +151,7 @@ graphRouter.get('/search', asyncHandler(async (req, res) => {
       [userId, pattern],
     ),
     pool.query(
-      `SELECT id, content AS title, NULL::text AS synopsis, created_at FROM nuggets
+      `SELECT id, collection_id, content AS title, NULL::text AS synopsis, created_at FROM nuggets
        WHERE user_id = $1 AND content ILIKE $2
        LIMIT 20`,
       [userId, pattern],
@@ -162,14 +163,17 @@ graphRouter.get('/search', asyncHandler(async (req, res) => {
       id: r.id as string, type: 'conversation' as const,
       label: (r.title as string | null) ?? 'Untitled conversation',
       synopsis: r.synopsis as string | null, createdAt: r.created_at as string,
+      collectionId: null,
     })),
     ...collRows.rows.map((r) => ({
       id: r.id as string, type: 'collection' as const,
       label: r.title as string, synopsis: null, createdAt: r.created_at as string,
+      collectionId: null,
     })),
     ...nuggetRows.rows.map((r) => ({
       id: r.id as string, type: 'nugget' as const,
       label: truncate(r.title as string, 60), synopsis: null, createdAt: r.created_at as string,
+      collectionId: r.collection_id as string,
     })),
   ];
 

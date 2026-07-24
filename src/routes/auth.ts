@@ -79,3 +79,31 @@ authRouter.get('/me', requireAuth, asyncHandler(async (_req, res) => {
   if (!user) return sendError(res, 401, 'UNAUTHORIZED', 'Unauthorized');
   res.json({ user });
 }));
+
+authRouter.patch('/me', requireAuth, asyncHandler(async (req, res) => {
+  const fields: Parameters<typeof store.updateUser>[1] = {};
+  if (req.body.firstName !== undefined) fields.firstName = String(req.body.firstName);
+  if (req.body.lastName  !== undefined) fields.lastName  = String(req.body.lastName);
+  if (req.body.email     !== undefined) {
+    if (!isEmail(String(req.body.email))) return sendError(res, 400, 'VALIDATION_ERROR', 'valid email is required');
+    fields.email = String(req.body.email);
+  }
+  let user;
+  try {
+    user = await store.updateUser(res.locals.userId!, fields);
+  } catch (e: unknown) {
+    if ((e as { code?: string }).code === '23505') {
+      return sendError(res, 409, 'EMAIL_TAKEN', 'An account with this email already exists');
+    }
+    throw e;
+  }
+  if (!user) return sendError(res, 404, 'NOT_FOUND', 'User not found');
+  res.json({ user });
+}));
+
+authRouter.delete('/me', requireAuth, asyncHandler(async (_req, res) => {
+  await tokenStore.deleteUserRefreshTokens(res.locals.userId!);
+  const deleted = await store.deleteUser(res.locals.userId!);
+  if (!deleted) return sendError(res, 404, 'NOT_FOUND', 'User not found');
+  res.status(204).send();
+}));
