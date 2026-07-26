@@ -4,7 +4,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import { requireAuth } from './middleware/requireAuth';
+import { requireAuth, requireRole } from './middleware/requireAuth';
 import { authRouter } from './routes/auth';
 import { collectionsRouter } from './routes/collections';
 import { sessionsRouter } from './routes/sessions';
@@ -14,6 +14,7 @@ import { conversationsRouter } from './routes/conversations';
 import { quizRouter } from './routes/quiz';
 import { graphRouter } from './routes/graph';
 import { retentionGraphRouter } from './routes/retentionGraph';
+import { adminRouter } from './routes/admin';
 
 const app = express();
 
@@ -68,6 +69,7 @@ app.use('/api/conversations',  apiLimiter, requireAuth, conversationsRouter);
 app.use('/api/quiz',           apiLimiter, requireAuth, quizRouter);
 app.use('/api/graph',           apiLimiter, requireAuth, graphRouter);
 app.use('/api/retention-graph', apiLimiter, requireAuth, retentionGraphRouter);
+app.use('/api/admin',           apiLimiter, requireAuth, requireRole('admin', 'support'), adminRouter);
 
 app.get('/api/health', async (_req, res) => {
   try {
