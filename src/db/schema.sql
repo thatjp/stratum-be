@@ -11,6 +11,12 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (lower(email));
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+DO $$ BEGIN
+  ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('user','support','admin'));
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
+
 -- Refresh tokens
 CREATE TABLE IF NOT EXISTS refresh_tokens (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),

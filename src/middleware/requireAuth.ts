@@ -1,6 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { sendError } from './sendError';
+import { asyncHandler } from './asyncHandler';
+import * as store from '../store/users';
 
 interface TokenPayload {
   userId: string;
@@ -19,4 +21,18 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   } catch {
     return sendError(res, 401, 'UNAUTHORIZED', 'Invalid or expired token');
   }
+}
+
+// Layer after requireAuth. Looks up the caller's current role on every
+// request (roles can change without waiting for a token to expire) and
+// rejects unless it's in the allowed set.
+export function requireRole(...roles: store.UserRole[]) {
+  return asyncHandler(async (_req: Request, res: Response, next: NextFunction) => {
+    const role = await store.getUserRole(res.locals.userId!);
+    if (!role || !roles.includes(role)) {
+      return sendError(res, 403, 'FORBIDDEN', 'You do not have permission to perform this action');
+    }
+    res.locals.role = role;
+    next();
+  });
 }
