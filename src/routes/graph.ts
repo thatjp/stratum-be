@@ -69,6 +69,7 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
       label:     (r.title as string | null) ?? 'Untitled conversation',
       synopsis:  r.synopsis as string | null,
       createdAt: r.created_at as string,
+      collectionId: null,
     })),
     ...archConvRows.rows.map((r) => ({
       id:        r.id as string,
@@ -76,6 +77,7 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
       label:     (r.title as string | null) ?? 'Archived conversation',
       synopsis:  r.synopsis as string | null,
       createdAt: r.created_at as string,
+      collectionId: null,
     })),
     ...collRows.rows.map((r) => ({
       id:        r.id as string,
@@ -83,6 +85,7 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
       label:     r.title as string,
       synopsis:  null,
       createdAt: r.created_at as string,
+      collectionId: null,
     })),
     ...archCollRows.rows.map((r) => ({
       id:        r.id as string,
@@ -90,6 +93,7 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
       label:     r.title as string,
       synopsis:  r.synopsis as string | null,
       createdAt: r.created_at as string,
+      collectionId: null,
     })),
     ...nuggetRows.rows.map((r) => ({
       id:        r.id as string,
@@ -97,6 +101,7 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
       label:     truncate(r.title as string, 60),
       synopsis:  null,
       createdAt: r.created_at as string,
+      collectionId: r.collection_id as string | null,
     })),
   ];
 
@@ -275,6 +280,7 @@ Respond with ONLY a JSON array of integer indices (from the list above), e.g. [0
         label:     c.label,
         synopsis:  c.body ? truncate(c.body, 200) : null,
         createdAt: new Date().toISOString(),
+        collectionId: null,
       };
     });
 

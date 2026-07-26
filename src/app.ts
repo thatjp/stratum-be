@@ -13,6 +13,7 @@ import { reviewRouter } from './routes/review';
 import { conversationsRouter } from './routes/conversations';
 import { quizRouter } from './routes/quiz';
 import { graphRouter } from './routes/graph';
+import { retentionGraphRouter } from './routes/retentionGraph';
 
 const app = express();
 
@@ -65,7 +66,8 @@ app.use('/api/artifacts',      apiLimiter, requireAuth, artifactsRouter);
 app.use('/api/review',         apiLimiter, requireAuth, reviewRouter);
 app.use('/api/conversations',  apiLimiter, requireAuth, conversationsRouter);
 app.use('/api/quiz',           apiLimiter, requireAuth, quizRouter);
-app.use('/api/graph',          apiLimiter, requireAuth, graphRouter);
+app.use('/api/graph',           apiLimiter, requireAuth, graphRouter);
+app.use('/api/retention-graph', apiLimiter, requireAuth, retentionGraphRouter);
 
 app.get('/api/health', async (_req, res) => {
   try {
