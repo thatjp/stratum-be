@@ -31,10 +31,52 @@ export interface HomeCollectionCard {
   proficiencySample: number[];
 }
 
+/** One collection as a spatial “bed” on the home garden. */
+export interface GardenPatch {
+  collectionId: string;
+  title: string;
+  goal: string | null;
+  goalTargetAt: string | null;
+  daysUntilTarget: number | null;
+  avgProficiency: number;
+  dueCount: number;
+  atRiskCount: number;
+  nodeCount: number;
+  lastActivityAt: string | null;
+  urgencyScore: number;
+  /** Normalized 0–1 position in garden bounds. */
+  x: number;
+  y: number;
+  /** Normalized radius (roughly 0.06–0.16). */
+  radius: number;
+}
+
+export interface GardenBridge {
+  id: string;
+  aCollectionId: string;
+  bCollectionId: string;
+  linkCount: number;
+  strength: number;
+  samples: {
+    nuggetAId: string;
+    nuggetBId: string;
+    labelA: string;
+    labelB: string;
+  }[];
+}
+
+export interface HomeGarden {
+  layoutVersion: number;
+  patches: GardenPatch[];
+  /** Phase B — always empty for now. */
+  bridges: GardenBridge[];
+}
+
 export interface HomePayload {
   stats: reviewStore.UserStats;
   collections: HomeCollectionCard[];
   suggestions: HomeSuggestion[];
+  garden: HomeGarden;
 }
 
 function daysUntil(iso: string | null): number | null {
@@ -81,7 +123,92 @@ function urgencyScore(input: {
   return score;
 }
 
+/** Stable 0–1 float from an id string (FNV-1a style). */
+function hashUnit(id: string, salt = ''): number {
+  const s = id + salt;
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 0xffffffff;
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+function radiusFromNodeCount(nodeCount: number): number {
+  const t = Math.min(nodeCount, 80) / 80;
+  return 0.07 + t * 0.08;
+}
+
+/**
+ * Deterministic garden layout: hash-seeded positions, then a few repulsion
+ * passes in id order so patches don't sit on top of each other. Urgency must
+ * not move beds — only health/size change across refreshes.
+ */
+function layoutGardenPatches(cards: HomeCollectionCard[]): GardenPatch[] {
+  const ordered = [...cards].sort((a, b) =>
+    a.collection.id.localeCompare(b.collection.id),
+  );
+
+  type Pt = { x: number; y: number; r: number; card: HomeCollectionCard };
+  const pts: Pt[] = ordered.map((card) => {
+    const x = 0.18 + hashUnit(card.collection.id, 'x') * 0.64;
+    const y = 0.20 + hashUnit(card.collection.id, 'y') * 0.58;
+    return { x, y, r: radiusFromNodeCount(card.nodeCount), card };
+  });
+
+  for (let pass = 0; pass < 8; pass++) {
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        const a = pts[i];
+        const b = pts[j];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const dist = Math.hypot(dx, dy) || 0.0001;
+        const minDist = a.r + b.r + 0.04;
+        if (dist >= minDist) continue;
+        const push = (minDist - dist) / 2;
+        const ux = dx / dist;
+        const uy = dy / dist;
+        a.x -= ux * push;
+        a.y -= uy * push;
+        b.x += ux * push;
+        b.y += uy * push;
+      }
+    }
+    for (const p of pts) {
+      p.x = clamp(p.x, 0.12, 0.88);
+      p.y = clamp(p.y, 0.14, 0.86);
+    }
+  }
+
+  return pts.map(({ x, y, r, card }) => {
+    const c = card.collection;
+    return {
+      collectionId: c.id,
+      title: c.title,
+      goal: c.goal ?? null,
+      goalTargetAt: c.goalTargetAt ?? null,
+      daysUntilTarget: card.daysUntilTarget,
+      avgProficiency: card.avgProficiency,
+      dueCount: card.dueCount,
+      atRiskCount: card.atRiskCount,
+      nodeCount: card.nodeCount,
+      lastActivityAt: c.lastSessionAt ?? null,
+      urgencyScore: card.urgencyScore,
+      x: Math.round(x * 1000) / 1000,
+      y: Math.round(y * 1000) / 1000,
+      radius: Math.round(r * 1000) / 1000,
+    };
+  });
+}
+
 export async function getHome(userId: string): Promise<HomePayload> {
+  const emptyGarden: HomeGarden = { layoutVersion: 1, patches: [], bridges: [] };
+
   const [stats, collections] = await Promise.all([
     reviewStore.getUserStats(userId),
     collectionsStore.getCollections(userId),
@@ -99,12 +226,12 @@ export async function getHome(userId: string): Promise<HomePayload> {
         collectionId: null,
         priority: 100,
       }],
+      garden: emptyGarden,
     };
   }
 
   const ids = collections.map((c) => c.id);
 
-  // Per-collection due counts (accepted artifacts currently due)
   const { rows: dueRows } = await pool.query(
     `SELECT n.collection_id, COUNT(*)::int AS due_count
      FROM artifacts a
@@ -120,7 +247,6 @@ export async function getHome(userId: string): Promise<HomePayload> {
     dueRows.map((r) => [r.collection_id as string, Number(r.due_count)]),
   );
 
-  // Per-nugget proficiency aggregates for avg / at-risk / samples
   const { rows: nuggetRows } = await pool.query(
     `SELECT
        n.id,
@@ -277,5 +403,10 @@ export async function getHome(userId: string): Promise<HomePayload> {
     },
     collections: cards,
     suggestions: suggestions.slice(0, 8),
+    garden: {
+      layoutVersion: 1,
+      patches: layoutGardenPatches(cards),
+      bridges: [],
+    },
   };
 }
