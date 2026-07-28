@@ -14,6 +14,7 @@ import { conversationsRouter } from './routes/conversations';
 import { quizRouter } from './routes/quiz';
 import { graphRouter } from './routes/graph';
 import { retentionGraphRouter } from './routes/retentionGraph';
+import { nuggetLinksRouter } from './routes/nuggetLinks';
 import { adminRouter } from './routes/admin';
 
 const app = express();
@@ -69,6 +70,7 @@ app.use('/api/conversations',  apiLimiter, requireAuth, conversationsRouter);
 app.use('/api/quiz',           apiLimiter, requireAuth, quizRouter);
 app.use('/api/graph',           apiLimiter, requireAuth, graphRouter);
 app.use('/api/retention-graph', apiLimiter, requireAuth, retentionGraphRouter);
+app.use('/api/nuggets',         apiLimiter, requireAuth, nuggetLinksRouter);
 app.use('/api/admin',           apiLimiter, requireAuth, requireRole('admin', 'support'), adminRouter);
 
 app.get('/api/health', async (_req, res) => {

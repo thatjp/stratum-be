@@ -239,3 +239,23 @@ CREATE TABLE IF NOT EXISTS token_usage (
 
 CREATE INDEX IF NOT EXISTS token_usage_user_id_idx     ON token_usage(user_id);
 CREATE INDEX IF NOT EXISTS token_usage_created_at_idx  ON token_usage(user_id, created_at);
+
+-- Nugget links (Zettelkasten-style cross-references between atomic notes).
+-- Undirected: nugget_a_id/nugget_b_id are ordered LEAST/GREATEST at write time
+-- so a pair is only ever stored once, regardless of which side initiated it.
+CREATE TABLE IF NOT EXISTS nugget_links (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  nugget_a_id  UUID NOT NULL REFERENCES nuggets(id) ON DELETE CASCADE,
+  nugget_b_id  UUID NOT NULL REFERENCES nuggets(id) ON DELETE CASCADE,
+  note         TEXT,
+  source       TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'ai_suggested')),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT nugget_links_no_self_link CHECK (nugget_a_id <> nugget_b_id),
+  CONSTRAINT nugget_links_ordered CHECK (nugget_a_id < nugget_b_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS nugget_links_pair_idx ON nugget_links(nugget_a_id, nugget_b_id);
+CREATE INDEX IF NOT EXISTS nugget_links_a_idx ON nugget_links(nugget_a_id);
+CREATE INDEX IF NOT EXISTS nugget_links_b_idx ON nugget_links(nugget_b_id);
+CREATE INDEX IF NOT EXISTS nugget_links_user_id_idx ON nugget_links(user_id);

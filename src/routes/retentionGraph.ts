@@ -78,9 +78,30 @@ retentionGraphRouter.get('/:collectionId', asyncHandler(async (req, res) => {
     ? Math.round((nodes.reduce((s, n) => s + n.proficiency, 0) / nodes.length) * 100)
     : 0;
 
+  // Same-collection Zettelkasten edges only — cross-collection links stay off
+  // the map canvas and are surfaced in the node detail chip instead.
+  const nuggetIds = nodes.map((n) => n.id);
+  let edges: { id: string; aId: string; bId: string }[] = [];
+  if (nuggetIds.length > 0) {
+    const { rows: edgeRows } = await pool.query(
+      `SELECT id, nugget_a_id, nugget_b_id
+       FROM nugget_links
+       WHERE user_id = $1
+         AND nugget_a_id = ANY($2::uuid[])
+         AND nugget_b_id = ANY($2::uuid[])`,
+      [userId, nuggetIds],
+    );
+    edges = edgeRows.map((r) => ({
+      id:  r.id as string,
+      aId: r.nugget_a_id as string,
+      bId: r.nugget_b_id as string,
+    }));
+  }
+
   res.json({
     collection: { id: collection.id as string, title: collection.title as string },
     nodes,
+    edges,
     avgProficiency,
   });
 }));

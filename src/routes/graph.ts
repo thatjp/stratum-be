@@ -194,6 +194,13 @@ graphRouter.post('/related', asyncHandler(async (req, res) => {
   const userId       = res.locals.userId!;
   const artifactId   = String(req.body.artifactId ?? '');
   const artifactType = String(req.body.artifactType ?? '');
+  // Optional: restrict the candidate pool to specific node types (e.g. ['nugget']
+  // for Zettelkasten-style nugget-to-nugget linking, where only nuggets are
+  // linkable). Omitted/empty means "no restriction" — existing callers unaffected.
+  const candidateTypes: string[] = Array.isArray(req.body.candidateTypes)
+    ? req.body.candidateTypes.filter((t: unknown) => typeof t === 'string')
+    : [];
+  const wantsType = (type: string) => candidateTypes.length === 0 || candidateTypes.includes(type);
 
   if (!artifactId || !artifactType) {
     return sendError(res, 400, 'VALIDATION_ERROR', 'artifactId and artifactType are required');
@@ -203,23 +210,29 @@ graphRouter.post('/related', asyncHandler(async (req, res) => {
   const sourceLabel = await fetchLabel(artifactId, artifactType, userId);
   if (!sourceLabel) return sendError(res, 404, 'NOT_FOUND', 'Artifact not found');
 
-  // Fetch all other artifacts as candidates
+  // Fetch all other artifacts as candidates (skipping queries for excluded types)
   const [convRows, collRows, nuggetRows] = await Promise.all([
-    pool.query(
-      `SELECT id, COALESCE(title, 'Untitled conversation') AS label, synopsis AS body, 'conversation' AS type
-       FROM conversations WHERE user_id = $1 AND archived_at IS NULL AND id != $2`,
-      [userId, artifactId],
-    ),
-    pool.query(
-      `SELECT id, title AS label, NULL AS body, 'collection' AS type
-       FROM collections WHERE user_id = $1 AND archived_at IS NULL AND id != $2`,
-      [userId, artifactId],
-    ),
-    pool.query(
-      `SELECT id, content AS label, NULL AS body, 'nugget' AS type
-       FROM nuggets WHERE user_id = $1 AND id != $2 LIMIT 100`,
-      [userId, artifactId],
-    ),
+    wantsType('conversation')
+      ? pool.query(
+          `SELECT id, COALESCE(title, 'Untitled conversation') AS label, synopsis AS body, 'conversation' AS type
+           FROM conversations WHERE user_id = $1 AND archived_at IS NULL AND id != $2`,
+          [userId, artifactId],
+        )
+      : { rows: [] },
+    wantsType('collection')
+      ? pool.query(
+          `SELECT id, title AS label, NULL AS body, 'collection' AS type
+           FROM collections WHERE user_id = $1 AND archived_at IS NULL AND id != $2`,
+          [userId, artifactId],
+        )
+      : { rows: [] },
+    wantsType('nugget')
+      ? pool.query(
+          `SELECT id, content AS label, NULL AS body, 'nugget' AS type
+           FROM nuggets WHERE user_id = $1 AND id != $2 LIMIT 100`,
+          [userId, artifactId],
+        )
+      : { rows: [] },
   ]);
 
   type Candidate = { id: string; label: string; body: string | null; type: string };
