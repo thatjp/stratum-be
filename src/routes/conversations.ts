@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { pool } from '../db';
+import { logger } from '../logger';
 import * as convStore from '../store/conversations';
 import * as convService from '../services/conversation';
 import { asyncHandler } from '../middleware/asyncHandler';
@@ -105,6 +106,7 @@ conversationsRouter.delete('/:id', asyncHandler(async (req, res) => {
     title:    conversation.title,
     synopsis: conversation.synopsis,
     messages,
+    userId,
   });
   const archived = await convStore.archiveConversation(id, userId, ghost);
   if (!archived) return sendError(res, 404, 'NOT_FOUND', 'Conversation not found');
@@ -139,7 +141,10 @@ conversationsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
     recentMessages: historyForAPI,
   });
 
-  const mapPayload = await convService.detectMapPayload(content, aiResponse.content);
+  const mapPayload = await convService.detectMapPayload(content, aiResponse.content, {
+    userId:         res.locals.userId!,
+    conversationId: id,
+  });
 
   const assistantMsg = await convStore.addMessage({
     conversationId: id,
@@ -153,10 +158,10 @@ conversationsRouter.post('/:id/messages', asyncHandler(async (req, res) => {
   // (+2: user message + assistant message both inserted above)
   const convForTasks = { ...conversation, messageCount: conversation.messageCount + 2 };
   convService.maybeSynopsize(id, res.locals.userId!, convForTasks).catch((err: unknown) =>
-    console.error({ event: 'synopsize_failed', conversationId: id, err: String(err) }),
+    logger.error({ event: 'synopsize_failed', conversationId: id, err: String(err) }),
   );
   convService.maybeAutoTitle(id, res.locals.userId!, convForTasks, content, aiResponse.content).catch((err: unknown) =>
-    console.error({ event: 'auto_title_failed', conversationId: id, err: String(err) }),
+    logger.error({ event: 'auto_title_failed', conversationId: id, err: String(err) }),
   );
 
   res.json({ userMessage: userMsg, assistantMessage: assistantMsg });
@@ -184,6 +189,7 @@ conversationsRouter.post('/:id/quiz/start', asyncHandler(async (req, res) => {
     purpose:         purpose ?? null,
     convSynopsis:    conversation.synopsis ?? null,
     recentMessages:  recentMessages.slice(-10),
+    conversationId:  id,
   });
 
   if (!questions.length) {
@@ -254,6 +260,8 @@ async function handleQuizAnswer(
     question:       current.question,
     expectedAnswer: current.expectedAnswer,
     userAnswer,
+    userId:         conversation.userId,
+    conversationId: id,
   });
 
   // Build the new state from the read snapshot — do not mutate the original object
@@ -270,7 +278,10 @@ async function handleQuizAnswer(
   if (isLastQ) {
     newQuizState = { ...quizState, questions: updatedQuestions, active: false, currentIndex: nextIndex };
 
-    const { summary, score, weakNuggetIds } = await convService.generateQuizSummary(updatedQuestions);
+    const { summary, score, weakNuggetIds } = await convService.generateQuizSummary(updatedQuestions, {
+      userId:         conversation.userId,
+      conversationId: id,
+    });
     const total = updatedQuestions.length;
 
     assistantContent = `${isCorrect ? '✓ Correct.' : '✗ Not quite.'} ${feedback}\n\n---\n\n**Quiz complete! You scored ${score}/${total}.**\n\n${summary}`;

@@ -1,12 +1,12 @@
 import { Router } from 'express';
-import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
 import { pool } from '../db';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { sendError } from '../middleware/sendError';
+import { escapeIlike } from '../middleware/validate';
+import { callClaudeJSON, HAIKU_MODEL } from '../services/claude';
 
 export const graphRouter = Router();
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 type NodeType =
   | 'conversation'
@@ -30,6 +30,10 @@ interface GraphEdge {
 }
 
 const NUGGET_DISPLAY_LIMIT = 1000;
+// Cap how many candidates we send to Claude for /related. Without this a heavy
+// user's synopses alone can blow past tens of thousands of tokens per tap.
+const RELATED_CANDIDATE_LIMIT = 40;
+const MAX_RELATED = 10;
 
 // ─── GET /graph ───────────────────────────────────────────────────────────────
 
@@ -144,24 +148,25 @@ graphRouter.get('/search', asyncHandler(async (req, res) => {
   const q      = String(req.query.q ?? '').trim();
   if (!q) return res.json({ nodes: [] });
 
-  const pattern = `%${q}%`;
+  // ESCAPE '\' so a query of "%" or "_" can't match everything.
+  const pattern = `%${escapeIlike(q)}%`;
 
   const [convRows, collRows, nuggetRows] = await Promise.all([
     pool.query(
       `SELECT id, title, synopsis, created_at FROM conversations
-       WHERE user_id = $1 AND archived_at IS NULL AND title ILIKE $2
+       WHERE user_id = $1 AND archived_at IS NULL AND title ILIKE $2 ESCAPE '\\'
        LIMIT 20`,
       [userId, pattern],
     ),
     pool.query(
       `SELECT id, title, NULL::text AS synopsis, created_at FROM collections
-       WHERE user_id = $1 AND archived_at IS NULL AND title ILIKE $2
+       WHERE user_id = $1 AND archived_at IS NULL AND title ILIKE $2 ESCAPE '\\'
        LIMIT 20`,
       [userId, pattern],
     ),
     pool.query(
       `SELECT id, collection_id, content AS title, NULL::text AS synopsis, created_at FROM nuggets
-       WHERE user_id = $1 AND content ILIKE $2
+       WHERE user_id = $1 AND content ILIKE $2 ESCAPE '\\'
        LIMIT 20`,
       [userId, pattern],
     ),
@@ -214,47 +219,49 @@ graphRouter.post('/related', asyncHandler(async (req, res) => {
   const sourceLabel = await fetchLabel(artifactId, artifactType, userId);
   if (!sourceLabel) return sendError(res, 404, 'NOT_FOUND', 'Artifact not found');
 
-  // Fetch all other artifacts as candidates (skipping queries for excluded types)
+  // Fetch other artifacts as candidates — each type is capped so the Claude
+  // prompt stays bounded regardless of how large the user's graph is.
   const [convRows, collRows, nuggetRows] = await Promise.all([
     wantsType('conversation')
       ? pool.query(
-          `SELECT id, COALESCE(title, 'Untitled conversation') AS label, synopsis AS body, 'conversation' AS type
-           FROM conversations WHERE user_id = $1 AND archived_at IS NULL AND id != $2`,
-          [userId, artifactId],
+          `SELECT id, COALESCE(title, 'Untitled conversation') AS label, synopsis AS body, 'conversation' AS type, created_at
+           FROM conversations WHERE user_id = $1 AND archived_at IS NULL AND id != $2
+           ORDER BY updated_at DESC LIMIT $3`,
+          [userId, artifactId, RELATED_CANDIDATE_LIMIT],
         )
       : { rows: [] },
     wantsType('collection')
       ? pool.query(
-          `SELECT id, title AS label, NULL AS body, 'collection' AS type
-           FROM collections WHERE user_id = $1 AND archived_at IS NULL AND id != $2`,
-          [userId, artifactId],
+          `SELECT id, title AS label, NULL AS body, 'collection' AS type, created_at
+           FROM collections WHERE user_id = $1 AND archived_at IS NULL AND id != $2
+           ORDER BY updated_at DESC LIMIT $3`,
+          [userId, artifactId, RELATED_CANDIDATE_LIMIT],
         )
       : { rows: [] },
     wantsType('nugget')
       ? pool.query(
-          `SELECT id, content AS label, NULL AS body, 'nugget' AS type
-           FROM nuggets WHERE user_id = $1 AND id != $2 LIMIT 100`,
-          [userId, artifactId],
+          `SELECT id, content AS label, NULL AS body, 'nugget' AS type, created_at
+           FROM nuggets WHERE user_id = $1 AND id != $2
+           ORDER BY created_at DESC LIMIT $3`,
+          [userId, artifactId, RELATED_CANDIDATE_LIMIT],
         )
       : { rows: [] },
   ]);
 
-  type Candidate = { id: string; label: string; body: string | null; type: string };
+  type Candidate = { id: string; label: string; body: string | null; type: string; createdAt: string };
   const candidates: Candidate[] = [
     ...convRows.rows, ...collRows.rows, ...nuggetRows.rows,
   ].map((r) => ({
     id: r.id as string, label: truncate(r.label as string, 80),
     body: r.body as string | null, type: r.type as string,
+    createdAt: r.created_at as string,
   }));
 
   if (!candidates.length) return res.json({ relatedNodes: [] });
 
-  // Ask Claude which candidates are most related
   const candidateList = candidates
     .map((c, i) => `[${i}] (${c.type}) ${c.label}${c.body ? ` — ${truncate(c.body, 120)}` : ''}`)
     .join('\n');
-
-  const MAX_RELATED = 10;
 
   const prompt = `You are helping a learner surface related material in a knowledge graph.
 
@@ -270,33 +277,26 @@ Identify up to ${MAX_RELATED} candidates that are most relevant to the source ar
 
 Respond with ONLY a JSON array of integer indices (from the list above), e.g. [0, 3, 7]. No explanation.`;
 
-  let relatedIndices: number[] = [];
-  try {
-    const msg = await client.messages.create({
-      model:      'claude-haiku-4-5-20251001',
-      max_tokens: 128,
-      messages:   [{ role: 'user', content: prompt }],
-    });
-    const text = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '[]';
-    // Extract JSON array even if Claude adds a tiny preamble
-    const match = text.match(/\[[\d,\s]*\]/);
-    relatedIndices = match ? JSON.parse(match[0]) : [];
-    if (!Array.isArray(relatedIndices)) relatedIndices = [];
-  } catch {
-    relatedIndices = [];
-  }
+  const { data: relatedIndices } = await callClaudeJSON({
+    schema:    z.array(z.number().int().nonnegative()),
+    fallback:  [],
+    model:     HAIKU_MODEL,
+    maxTokens: 128,
+    usage:     { operation: 'graph_related', userId },
+    messages:  [{ role: 'user', content: prompt }],
+  });
 
   const relatedNodes: GraphNode[] = relatedIndices
-    .filter((i) => typeof i === 'number' && i >= 0 && i < candidates.length)
+    .filter((i) => i < candidates.length)
     .slice(0, MAX_RELATED)
     .map((i) => {
       const c = candidates[i];
       return {
-        id:        c.id,
-        type:      c.type as NodeType,
-        label:     c.label,
-        synopsis:  c.body ? truncate(c.body, 200) : null,
-        createdAt: new Date().toISOString(),
+        id:           c.id,
+        type:         c.type as NodeType,
+        label:        c.label,
+        synopsis:     c.body ? truncate(c.body, 200) : null,
+        createdAt:    c.createdAt,
         collectionId: null,
       };
     });

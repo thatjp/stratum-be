@@ -1,4 +1,5 @@
 import { pool } from '../db';
+import { escapeIlike } from '../middleware/validate';
 
 export type UserRole = 'user' | 'support' | 'admin';
 
@@ -111,9 +112,9 @@ export async function listUsers(opts: {
   let i = 1;
   if (opts.search?.trim()) {
     conditions.push(
-      `(lower(u.email) LIKE lower($${i}) OR lower(u.first_name) LIKE lower($${i}) OR lower(u.last_name) LIKE lower($${i}))`,
+      `(lower(u.email) LIKE lower($${i}) ESCAPE '\\' OR lower(u.first_name) LIKE lower($${i}) ESCAPE '\\' OR lower(u.last_name) LIKE lower($${i}) ESCAPE '\\')`,
     );
-    vals.push(`%${opts.search.trim()}%`);
+    vals.push(`%${escapeIlike(opts.search.trim())}%`);
     i++;
   }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';

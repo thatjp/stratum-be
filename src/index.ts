@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { app } from './app';
 import { pool, initSchema, resetStuckCaptures, pruneExpiredTokens } from './db';
+import { logger } from './logger';
 import { startQueue, stopQueue } from './queue';
 
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
@@ -13,12 +14,12 @@ const REQUIRED_ENV = ['JWT_SECRET', 'ANTHROPIC_API_KEY', 'DATABASE_URL'] as cons
 async function main() {
   const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
   if (missing.length) {
-    console.error({ event: 'startup_failed', missing }, 'Required environment variables are not set');
+    logger.fatal({ event: 'startup_failed', missing }, 'Required environment variables are not set');
     process.exit(1);
   }
 
   await initSchema();
-  console.log({ event: 'schema_initialized' });
+  logger.info({ event: 'schema_initialized' });
 
   // Startup maintenance is best-effort — a slow or failing sweep should not
   // keep the server from coming up and put the deploy into a restart loop.
@@ -29,13 +30,13 @@ async function main() {
   // would reset captures another is actively extracting.
   for (const task of [resetStuckCaptures, pruneExpiredTokens]) {
     await task().catch((err: unknown) =>
-      console.error({ event: 'startup_maintenance_failed', task: task.name, err: String(err) }),
+      logger.error({ event: 'startup_maintenance_failed', task: task.name, err: String(err) }),
     );
   }
 
   await startQueue();
   const server = app.listen(PORT, () => {
-    console.log({ event: 'server_started', port: PORT });
+    logger.info({ event: 'server_started', port: PORT });
   });
 
   // Railway sends SIGTERM on every deploy. Without draining, requests that are
@@ -45,29 +46,29 @@ async function main() {
   const shutdown = (signal: NodeJS.Signals) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log({ event: 'shutdown_started', signal });
+    logger.info({ event: 'shutdown_started', signal });
 
     const forceExit = setTimeout(() => {
-      console.error({ event: 'shutdown_forced', afterMs: SHUTDOWN_TIMEOUT_MS });
+      logger.error({ event: 'shutdown_forced', afterMs: SHUTDOWN_TIMEOUT_MS });
       process.exit(1);
     }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
 
     server.close(async (err) => {
-      if (err) console.error({ event: 'shutdown_server_close_failed', err: err.message });
+      if (err) logger.error({ event: 'shutdown_server_close_failed', err: err.message });
       // Stop the queue before the pool: a graceful stop lets in-flight jobs
       // finish, and they still need database access to do it.
       try {
         await stopQueue();
       } catch (queueErr) {
-        console.error({ event: 'shutdown_queue_stop_failed', err: String(queueErr) });
+        logger.error({ event: 'shutdown_queue_stop_failed', err: String(queueErr) });
       }
       try {
         await pool.end();
       } catch (poolErr) {
-        console.error({ event: 'shutdown_pool_close_failed', err: String(poolErr) });
+        logger.error({ event: 'shutdown_pool_close_failed', err: String(poolErr) });
       }
-      console.log({ event: 'shutdown_complete' });
+      logger.info({ event: 'shutdown_complete' });
       process.exit(err ? 1 : 0);
     });
 
@@ -81,6 +82,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Fatal startup error:', err);
+  logger.fatal({ err }, 'Fatal startup error');
   process.exit(1);
 });

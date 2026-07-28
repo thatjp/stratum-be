@@ -1,17 +1,22 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
+import { callClaudeJSON, DEFAULT_MODEL } from './claude';
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const ArtifactSchema = z.object({
+  kind:  z.enum(['flashcard', 'quiz_question', 'summary_bullet', 'action_item', 'vocab_card']),
+  front: z.string().min(1).max(500),
+  back:  z.string().min(1).max(500),
+});
 
-export interface ExtractedNugget {
-  content: string;
-  sourceText: string;
-  confidence: number;
-  artifacts: Array<{
-    kind: 'flashcard' | 'quiz_question' | 'summary_bullet' | 'action_item' | 'vocab_card';
-    front: string;
-    back: string;
-  }>;
-}
+const NuggetSchema = z.object({
+  content:    z.string().min(1),
+  sourceText: z.string().default(''),
+  confidence: z.number().min(0).max(1).default(1),
+  artifacts:  z.array(ArtifactSchema).default([]),
+});
+
+const NuggetsSchema = z.array(NuggetSchema);
+
+export type ExtractedNugget = z.infer<typeof NuggetSchema>;
 
 const INTENT_INSTRUCTIONS: Record<string, string> = {
   study: `Generate flashcards and quiz questions. Focus on definitions, key concepts, and testable facts.
@@ -26,12 +31,16 @@ const INTENT_INSTRUCTIONS: Record<string, string> = {
 export async function extractNuggets(
   text: string,
   intent: string,
+  usage?: { userId?: string },
 ): Promise<ExtractedNugget[]> {
   const intentGuide = INTENT_INSTRUCTIONS[intent] ?? INTENT_INSTRUCTIONS.study;
 
-  const response = await client.messages.create({
-    model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 4096,
+  const { data } = await callClaudeJSON({
+    schema:    NuggetsSchema,
+    fallback:  [],
+    model:     DEFAULT_MODEL(),
+    maxTokens: 4096,
+    usage:     { operation: 'extract_nuggets', userId: usage?.userId },
     system: `You are a knowledge extraction engine. Given a passage of text, extract atomic nuggets of knowledge
 and generate study artifacts from them. Return ONLY valid JSON — no markdown, no explanation.
 
@@ -62,22 +71,11 @@ Rules:
 - If the text is too sparse or incoherent to extract nuggets, return []`,
     messages: [
       {
-        role: 'user',
+        role:    'user',
         content: `Extract knowledge nuggets from this passage:\n\n${text}`,
       },
     ],
   });
 
-  const raw = response.content[0].type === 'text' ? response.content[0].text : '';
-
-  // Strip markdown code fences if present
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-
-  try {
-    const parsed = JSON.parse(cleaned);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    console.error('Failed to parse extraction response:', cleaned.slice(0, 200));
-    return [];
-  }
+  return data;
 }

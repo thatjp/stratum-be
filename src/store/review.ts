@@ -1,4 +1,5 @@
 import { pool, withTransaction } from '../db';
+import { applySm2, dueAtFromInterval, normalizeSm2State } from '../services/sm2';
 
 export interface ReviewArtifact {
   id: string;
@@ -138,18 +139,6 @@ export async function getUserStats(userId: string): Promise<UserStats> {
   };
 }
 
-// SM-2 bounds. Without an upper limit the interval compounds by roughly the
-// ease factor on every correct answer, which overflows interval_days (INT) and
-// produces due dates outside the range a JS Date can represent — around the
-// twentieth consecutive correct review.
-const MIN_EASE_FACTOR   = 1.3;
-const MAX_EASE_FACTOR   = 2.5;
-const MAX_INTERVAL_DAYS = 365;
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
 // SM-2 spaced repetition update
 export async function recordRecallAttempt(input: {
   artifactId: string;
@@ -166,22 +155,15 @@ export async function recordRecallAttempt(input: {
     );
     if (!artRows[0]) throw new Error('Artifact not found');
 
-    // Clamp on read too, so a row written by an earlier unbounded version can
-    // still be reviewed instead of throwing on the next scheduling calculation.
-    let easeFactor   = clamp(Number(artRows[0].ease_factor), MIN_EASE_FACTOR, MAX_EASE_FACTOR);
-    let intervalDays = clamp(Number(artRows[0].interval_days), 1, MAX_INTERVAL_DAYS);
+    const { easeFactor, intervalDays } = applySm2(
+      normalizeSm2State({
+        easeFactor:   Number(artRows[0].ease_factor),
+        intervalDays: Number(artRows[0].interval_days),
+      }),
+      input.result,
+    );
 
-    // SM-2 algorithm
-    if (input.result === 'correct') {
-      intervalDays = Math.min(MAX_INTERVAL_DAYS, Math.round(intervalDays * easeFactor));
-      easeFactor   = Math.min(MAX_EASE_FACTOR, easeFactor + 0.1);
-    } else if (input.result === 'incorrect') {
-      intervalDays = 1;
-      easeFactor   = Math.max(MIN_EASE_FACTOR, easeFactor - 0.2);
-    }
-    // skipped: no scheduling change, just log it
-
-    const nextDueAt = new Date(Date.now() + intervalDays * 86_400_000).toISOString();
+    const nextDueAt = dueAtFromInterval(intervalDays);
 
     if (input.result !== 'skipped') {
       await client.query(

@@ -1,29 +1,16 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
 import { pool } from '../db';
 import * as convStore from '../store/conversations';
 import type { Message } from '../store/conversations';
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+import {
+  callClaudeJSON,
+  callClaudeText,
+  DEFAULT_MODEL,
+  HAIKU_MODEL,
+} from './claude';
+import { gradeAnswer as gradeQuizAnswer, summarizeQuizPerformance } from './quiz';
 
 const SYNOPSIS_THRESHOLD = 20;
-
-// Fire-and-forget token usage logger — never blocks the calling path
-function logTokenUsage(params: {
-  userId:         string;
-  conversationId?: string;
-  operation:      string;
-  model:          string;
-  inputTokens:    number;
-  outputTokens:   number;
-}): void {
-  pool.query(
-    `INSERT INTO token_usage (user_id, conversation_id, operation, model, input_tokens, output_tokens)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [params.userId, params.conversationId ?? null, params.operation, params.model, params.inputTokens, params.outputTokens],
-  ).catch((err: unknown) =>
-    console.error({ event: 'token_usage_log_failed', err: String(err) }),
-  );
-}
 const CONTEXT_WINDOW     = 10;
 const MAX_QUIZ_QUESTIONS = 25;
 
@@ -66,7 +53,6 @@ export function invalidateGhostCache(userId: string): void {
 // MARK: - System prompt
 
 export async function buildSystemPrompt(conv: convStore.Conversation): Promise<string> {
-  // Fetch collection context and ghost context in parallel
   const [collectionRow, ghostContext] = await Promise.all([
     conv.collectionId
       ? pool.query(
@@ -115,30 +101,23 @@ export async function chat(params: {
 }): Promise<{ content: string; inputTokens: number; outputTokens: number }> {
   const systemPrompt = await buildSystemPrompt(params.conv);
 
-  const apiMessages: Anthropic.MessageParam[] = params.recentMessages.map((m) => ({
+  const apiMessages = params.recentMessages.map((m) => ({
     role:    m.role as 'user' | 'assistant',
     content: m.content,
   }));
   apiMessages.push({ role: 'user', content: params.userMessage });
 
-  const model = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
-  const response = await client.messages.create({
-    model,
-    max_tokens: 1024,
-    system:     systemPrompt,
-    messages:   apiMessages,
+  return callClaudeText({
+    model:     DEFAULT_MODEL(),
+    maxTokens: 1024,
+    system:    systemPrompt,
+    messages:  apiMessages,
+    usage:     {
+      operation:      'chat',
+      userId:         params.conv.userId,
+      conversationId: params.conv.id,
+    },
   });
-
-  const content = response.content[0].type === 'text' ? response.content[0].text : '';
-  logTokenUsage({
-    userId:         params.conv.userId,
-    conversationId: params.conv.id,
-    operation:      'chat',
-    model,
-    inputTokens:    response.usage.input_tokens,
-    outputTokens:   response.usage.output_tokens,
-  });
-  return { content, inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens };
 }
 
 // MARK: - Ghost synopsis generation
@@ -161,24 +140,24 @@ export async function generateCollectionGhost(params: {
     .map((r, i) => `${i + 1}. ${r.content}`)
     .join('\n');
 
-  const response = await client.messages.create({
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 300,
-    messages:   [{
+  const { content } = await callClaudeText({
+    model:     HAIKU_MODEL,
+    maxTokens: 300,
+    usage:     { operation: 'ghost_collection', userId: params.userId },
+    messages:  [{
       role:    'user',
       content: `The user has archived a collection titled "${params.title}". Write a 2-4 sentence ghost summary capturing the key topics and concepts they studied. This will be used as silent background context in future AI conversations. Third person, factual, no fluff.\n\nNuggets:\n${nuggetText}`,
     }],
   });
 
-  return response.content[0].type === 'text'
-    ? response.content[0].text
-    : `The user previously studied "${params.title}".`;
+  return content || `The user previously studied "${params.title}".`;
 }
 
 export async function generateConversationGhost(params: {
   title:          string | null;
   synopsis:       string | null;
   messages:       Message[];
+  userId?:        string;
 }): Promise<string> {
   const label = params.title ?? 'a conversation';
 
@@ -195,35 +174,50 @@ export async function generateConversationGhost(params: {
     contextParts.push(`Recent messages:\n${transcript}`);
   }
 
-  const response = await client.messages.create({
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 200,
-    messages:   [{
+  const { content } = await callClaudeText({
+    model:     HAIKU_MODEL,
+    maxTokens: 200,
+    usage:     { operation: 'ghost_conversation', userId: params.userId },
+    messages:  [{
       role:    'user',
       content: `The user has archived ${label}. Write a 1-3 sentence ghost summary of what was discussed. This will be silent background context in future AI conversations. Third person, factual.\n\n${contextParts.join('\n\n')}`,
     }],
   });
 
-  return response.content[0].type === 'text'
-    ? response.content[0].text
-    : `The user previously had ${label}.`;
+  return content || `The user previously had ${label}.`;
 }
 
 // MARK: - Map detection
 
 const MAP_KEYWORDS = /\b(where is|where('s| is) (the|a)\b|map of|located in|location of|find .{1,40} on a map|directions? to|navigate to|show me .{1,30} on (a )?map)\b/i;
 
+const MapSchema = z.discriminatedUnion('isMap', [
+  z.object({
+    isMap:     z.literal(true),
+    placeName: z.string().min(1),
+    query:     z.string().min(1),
+  }),
+  z.object({ isMap: z.literal(false) }),
+]);
+
 export async function detectMapPayload(
   userMessage: string,
   aiResponse:  string,
+  usage?: { userId?: string; conversationId?: string },
 ): Promise<convStore.MapPayload | null> {
-  // Skip the model call entirely if neither message contains geographic vocabulary
   if (!MAP_KEYWORDS.test(userMessage) && !MAP_KEYWORDS.test(aiResponse)) return null;
 
-  const response = await client.messages.create({
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 128,
-    messages:   [{
+  const { data } = await callClaudeJSON({
+    schema:    MapSchema,
+    fallback:  { isMap: false as const },
+    model:     HAIKU_MODEL,
+    maxTokens: 128,
+    usage:     {
+      operation:      'detect_map',
+      userId:         usage?.userId,
+      conversationId: usage?.conversationId,
+    },
+    messages: [{
       role:    'user',
       content: `Does this exchange ask where a place is or request a map?
 
@@ -236,18 +230,19 @@ Return ONLY valid JSON.`,
     }],
   });
 
-  const raw     = response.content[0].type === 'text' ? response.content[0].text : '{}';
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  try {
-    const parsed = JSON.parse(cleaned) as { isMap: boolean; placeName?: string; query?: string };
-    if (parsed.isMap && parsed.placeName && parsed.query) {
-      return { type: 'map', placeName: parsed.placeName, query: parsed.query };
-    }
-  } catch { /* not a map */ }
+  if (data.isMap) {
+    return { type: 'map', placeName: data.placeName, query: data.query };
+  }
   return null;
 }
 
 // MARK: - Quiz generation
+
+const ConvQuizQuestionsSchema = z.array(z.object({
+  question:       z.string().min(1),
+  expectedAnswer: z.string().min(1),
+  nuggetId:       z.string().nullable().optional().default(null),
+}));
 
 export async function generateQuizQuestions(params: {
   collectionIds:    string[];
@@ -256,10 +251,10 @@ export async function generateQuizQuestions(params: {
   purpose?:         string | null;
   convSynopsis?:    string | null;
   recentMessages?:  convStore.Message[];
+  conversationId?:  string;
 }): Promise<convStore.QuizQuestion[]> {
   const clampedCount = Math.min(params.count, MAX_QUIZ_QUESTIONS);
 
-  // Collect nuggets from specified collections (optional enrichment)
   let nuggetRows: Array<Record<string, unknown>> = [];
   if (params.collectionIds.length) {
     const { rows } = await pool.query(
@@ -271,7 +266,6 @@ export async function generateQuizQuestions(params: {
     nuggetRows = rows;
   }
 
-  // Build context sections — conversation history is primary; nuggets are additive
   const parts: string[] = [];
 
   if (params.convSynopsis) {
@@ -292,7 +286,6 @@ export async function generateQuizQuestions(params: {
     parts.push(`Knowledge nuggets:\n${nuggetText}`);
   }
 
-  // If we have no context at all, generate a general knowledge quiz
   const contextBlock = parts.length
     ? `Use the following context to generate questions:\n\n${parts.join('\n\n')}`
     : `Generate general knowledge quiz questions on any interesting topic.`;
@@ -301,10 +294,17 @@ export async function generateQuizQuestions(params: {
     ? `\nFocus area: ${params.purpose}\nPrioritize questions relevant to this focus.\n`
     : '';
 
-  const response = await client.messages.create({
-    model:      process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 2048,
-    messages:   [{
+  const { data } = await callClaudeJSON({
+    schema:    ConvQuizQuestionsSchema,
+    fallback:  [],
+    model:     DEFAULT_MODEL(),
+    maxTokens: 2048,
+    usage:     {
+      operation:      'conv_quiz_generate',
+      userId:         params.userId,
+      conversationId: params.conversationId,
+    },
+    messages: [{
       role:    'user',
       content: `Generate exactly ${clampedCount} quiz questions. Return ONLY valid JSON, no markdown.
 ${purposeLine}
@@ -317,88 +317,48 @@ Rules: distinct concepts, clear questions, concise answers (under 200 chars), va
     }],
   });
 
-  const raw     = response.content[0].type === 'text' ? response.content[0].text : '[]';
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  try {
-    const parsed = JSON.parse(cleaned) as Array<{ question: string; expectedAnswer: string; nuggetId: string | null }>;
-    return parsed.slice(0, clampedCount).map((q) => ({
-      question:       q.question,
-      expectedAnswer: q.expectedAnswer,
-      nuggetId:       q.nuggetId ?? null,
-      userAnswer:     null,
-      isCorrect:      null,
-      feedback:       null,
-    }));
-  } catch {
-    return [];
-  }
+  return data.slice(0, clampedCount).map((q) => ({
+    question:       q.question,
+    expectedAnswer: q.expectedAnswer,
+    nuggetId:       q.nuggetId ?? null,
+    userAnswer:     null,
+    isCorrect:      null,
+    feedback:       null,
+  }));
 }
 
-// MARK: - Grade a single answer
+// MARK: - Grade a single answer (delegates to the shared quiz grader)
 
 export async function gradeAnswer(params: {
   question:       string;
   expectedAnswer: string;
   userAnswer:     string;
+  userId?:        string;
+  conversationId?: string;
 }): Promise<{ isCorrect: boolean; feedback: string }> {
-  const response = await client.messages.create({
-    model:      process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 256,
-    messages:   [{
-      role:    'user',
-      content: `Grade this answer. Return ONLY valid JSON.
-
-Question: ${params.question}
-Expected: ${params.expectedAnswer}
-User answer: ${params.userAnswer}
-
-{"isCorrect": true/false, "feedback": "1-2 sentences. If wrong, explain why and give the right answer briefly."}
-
-Be generous — mark correct if the user captures the essential meaning.`,
-    }],
-  });
-
-  const raw     = response.content[0].type === 'text' ? response.content[0].text : '{}';
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  try {
-    const parsed = JSON.parse(cleaned) as { isCorrect: boolean; feedback: string };
-    return { isCorrect: Boolean(parsed.isCorrect), feedback: String(parsed.feedback ?? '') };
-  } catch {
-    return { isCorrect: false, feedback: 'Unable to grade answer.' };
-  }
+  return gradeQuizAnswer(params);
 }
 
 // MARK: - Quiz completion summary
 
-export async function generateQuizSummary(questions: convStore.QuizQuestion[]): Promise<{
+export async function generateQuizSummary(
+  questions: convStore.QuizQuestion[],
+  usage?: { userId?: string; conversationId?: string },
+): Promise<{
   summary:        string;
   score:          number;
   weakNuggetIds:  string[];
 }> {
-  const score  = questions.filter((q) => q.isCorrect).length;
-  const total  = questions.length;
-  const details = questions.map((q, i) =>
-    `Q${i + 1}: ${q.question}\nAnswer: ${q.userAnswer ?? '(none)'}\nCorrect: ${q.isCorrect ? 'Yes' : 'No'}\nFeedback: ${q.feedback ?? ''}`,
-  ).join('\n\n');
+  const score = questions.filter((q) => q.isCorrect).length;
+  const total = questions.length;
 
-  const response = await client.messages.create({
-    model:      process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 400,
-    messages:   [{
-      role:    'user',
-      content: `The user scored ${score}/${total} on a quiz. Write a brief, encouraging 2-3 sentence summary of their performance. Mention specific strengths and what to review. Return ONLY valid JSON: {"summary":"..."}
-
-${details}`,
-    }],
+  const summary = await summarizeQuizPerformance({
+    questions,
+    score,
+    maxScore:       total,
+    userId:         usage?.userId,
+    conversationId: usage?.conversationId,
   });
-
-  const raw     = response.content[0].type === 'text' ? response.content[0].text : '{}';
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  let summary   = `You scored ${score} out of ${total}.`;
-  try {
-    const parsed = JSON.parse(cleaned) as { summary: string };
-    summary = parsed.summary ?? summary;
-  } catch { /* keep default */ }
 
   const weakNuggetIds = questions
     .filter((q) => !q.isCorrect && q.nuggetId)
@@ -408,6 +368,11 @@ ${details}`,
 }
 
 // MARK: - Create review cards from weak nuggets
+
+const FlashcardSchema = z.object({
+  front: z.string().min(1).max(500),
+  back:  z.string().min(1).max(500),
+});
 
 export async function createCardsFromNuggets(params: {
   nuggetIds: string[];
@@ -420,7 +385,6 @@ export async function createCardsFromNuggets(params: {
     [params.nuggetIds, params.userId],
   );
 
-  // Filter out nuggets that already have an accepted artifact
   const { rows: existingRows } = await pool.query(
     `SELECT nugget_id FROM artifacts WHERE nugget_id = ANY($1::uuid[]) AND status = 'accepted'`,
     [rows.map((r) => r.id as string)],
@@ -437,20 +401,20 @@ export async function createCardsFromNuggets(params: {
     const batch = toProcess.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(
       batch.map(async (nugget) => {
-        const response = await client.messages.create({
-          model:      'claude-haiku-4-5-20251001',
-          max_tokens: 256,
-          messages:   [{
+        const { data: card } = await callClaudeJSON({
+          schema:    FlashcardSchema,
+          fallback:  { front: '', back: '' },
+          model:     HAIKU_MODEL,
+          maxTokens: 256,
+          usage:     { operation: 'create_flashcard', userId: params.userId },
+          messages:  [{
             role:    'user',
             content: `Create one flashcard from this nugget. Return ONLY valid JSON: {"front":"...","back":"..."}
 
 Nugget: ${nugget.content}`,
           }],
         });
-
-        const raw     = response.content[0].type === 'text' ? response.content[0].text : '{}';
-        const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-        const card    = JSON.parse(cleaned) as { front: string; back: string };
+        if (!card.front || !card.back) throw new Error('empty flashcard');
         await pool.query(
           `INSERT INTO artifacts (nugget_id, user_id, kind, front, back, status, due_at)
            VALUES ($1, $2, 'flashcard', $3, $4, 'accepted', NOW())`,
@@ -474,13 +438,13 @@ export async function maybeAutoTitle(
   firstAiReply:     string,
 ): Promise<void> {
   if (conv.userTitled) return;
-  // Only title on the first exchange — messageCount was incremented before this call
   if (conv.messageCount > 2) return;
 
-  const response = await client.messages.create({
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 24,
-    messages:   [{
+  const { content } = await callClaudeText({
+    model:     HAIKU_MODEL,
+    maxTokens: 24,
+    usage:     { operation: 'auto_title', userId, conversationId },
+    messages:  [{
       role:    'user',
       content: `Write a 3-6 word title for this conversation exchange. Return only the title, no punctuation, no quotes.
 
@@ -489,10 +453,7 @@ Assistant: ${firstAiReply.slice(0, 300)}`,
     }],
   });
 
-  const title = response.content[0].type === 'text'
-    ? response.content[0].text.trim().replace(/^["']|["']$/g, '')
-    : null;
-
+  const title = content.trim().replace(/^["']|["']$/g, '') || null;
   if (title) {
     await convStore.updateConversation(conversationId, userId, { title });
   }
@@ -507,7 +468,6 @@ export async function maybeSynopsize(
 ): Promise<void> {
   if (conv.messageCount < SYNOPSIS_THRESHOLD) return;
 
-  // Guard against concurrent runs: skip if a synopsis was written in the last 60s
   if (conv.synopsisUpdatedAt) {
     const age = Date.now() - new Date(conv.synopsisUpdatedAt).getTime();
     if (age < 60_000) return;
@@ -525,23 +485,19 @@ export async function maybeSynopsize(
 
   const existing = conv.synopsis ? `Previous synopsis:\n${conv.synopsis}\n\nNew messages:\n` : '';
 
-  const response = await client.messages.create({
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 512,
-    messages:   [{
+  const { content: synopsis } = await callClaudeText({
+    model:     HAIKU_MODEL,
+    maxTokens: 512,
+    usage:     { operation: 'synopsize', userId, conversationId },
+    messages:  [{
       role:    'user',
       content: `${existing}Summarize this conversation excerpt in 3-6 sentences. Third person. Capture topics, insights reached, unresolved questions.\n\n${transcript}`,
     }],
   });
-
-  const synopsis = response.content[0].type === 'text' ? response.content[0].text : '';
   if (!synopsis) return;
 
-  // Write synopsis first — if this fails, messages are still intact
   await convStore.updateConversation(conversationId, userId, { synopsis });
 
-  // Only delete after the synopsis is safely persisted. message_count is
-  // decremented by the messages_count_delete trigger.
   const ids = toCompress.map((m) => m.id);
   if (ids.length) {
     await pool.query(`DELETE FROM messages WHERE id = ANY($1::uuid[])`, [ids]);

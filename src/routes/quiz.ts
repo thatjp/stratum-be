@@ -73,6 +73,7 @@ quizRouter.post('/:id/questions/:questionId/grade', asyncHandler(async (req, res
     question:       question.question,
     expectedAnswer: question.expectedAnswer,
     userAnswer,
+    userId:         res.locals.userId!,
   });
 
   const graded = await quizStore.gradeQuestion({
@@ -105,6 +106,7 @@ quizRouter.post('/:id/complete', asyncHandler(async (req, res) => {
     })),
     score:    session.score,
     maxScore: session.maxScore,
+    userId:   res.locals.userId!,
   });
 
   const completed = await quizStore.completeQuizSession({

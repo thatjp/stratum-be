@@ -1,7 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
 import { pool } from '../db';
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+import { callClaudeJSON, DEFAULT_MODEL } from './claude';
 
 export interface GeneratedQuestion {
   question: string;
@@ -10,12 +9,27 @@ export interface GeneratedQuestion {
   artifactId: string | null;
 }
 
+const GeneratedQuestionsSchema = z.array(z.object({
+  question:       z.string().min(1),
+  expectedAnswer: z.string().min(1),
+  nuggetId:       z.string().nullable().optional().default(null),
+  artifactId:     z.string().nullable().optional().default(null),
+}));
+
+const GradeSchema = z.object({
+  isCorrect: z.boolean(),
+  feedback:  z.string().default(''),
+});
+
+const OverviewSchema = z.object({
+  overview: z.string().min(1),
+});
+
 export async function generateQuestions(params: {
   collectionId?: string | null;
   userId: string;
   count: number;
 }): Promise<GeneratedQuestion[]> {
-  // Pull nuggets (and their artifacts) to generate questions from
   let nuggetRows: Array<Record<string, unknown>>;
   if (params.collectionId) {
     const { rows } = await pool.query(
@@ -50,13 +64,15 @@ export async function generateQuestions(params: {
     return `- [nugget_id: ${r.nugget_id as string}] ${r.content as string}${artifact ? '\n' + artifact : ''}`;
   }).join('\n');
 
-  const response = await client.messages.create({
-    model:      process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 2048,
-    messages:   [
-      {
-        role:    'user',
-        content: `Generate exactly ${params.count} quiz questions from these knowledge nuggets.
+  const { data } = await callClaudeJSON({
+    schema:    GeneratedQuestionsSchema,
+    fallback:  [],
+    model:     DEFAULT_MODEL(),
+    maxTokens: 2048,
+    usage:     { operation: 'quiz_generate', userId: params.userId },
+    messages:  [{
+      role:    'user',
+      content: `Generate exactly ${params.count} quiz questions from these knowledge nuggets.
 Return ONLY valid JSON — no markdown, no explanation.
 
 Nuggets:
@@ -78,34 +94,38 @@ Rules:
 - expectedAnswer should be concise (under 200 characters)
 - Vary question types: definition, application, comparison, recall
 - Return exactly ${params.count} items`,
-      },
-    ],
+    }],
   });
 
-  const raw = response.content[0].type === 'text' ? response.content[0].text : '[]';
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-
-  try {
-    const parsed = JSON.parse(cleaned);
-    return Array.isArray(parsed) ? parsed.slice(0, params.count) : [];
-  } catch {
-    console.error('Failed to parse quiz generation response:', cleaned.slice(0, 200));
-    return [];
-  }
+  return data.slice(0, params.count).map((q) => ({
+    question:       q.question,
+    expectedAnswer: q.expectedAnswer,
+    nuggetId:       q.nuggetId ?? null,
+    artifactId:     q.artifactId ?? null,
+  }));
 }
 
+// Shared by both the standalone quiz routes and the in-conversation quiz flow.
 export async function gradeAnswer(params: {
   question: string;
   expectedAnswer: string;
   userAnswer: string;
+  userId?: string;
+  conversationId?: string;
 }): Promise<{ isCorrect: boolean; feedback: string }> {
-  const response = await client.messages.create({
-    model:      process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 256,
-    messages:   [
-      {
-        role:    'user',
-        content: `Grade this quiz answer. Return ONLY valid JSON.
+  const { data } = await callClaudeJSON({
+    schema:    GradeSchema,
+    fallback:  { isCorrect: false, feedback: 'Unable to grade answer.' },
+    model:     DEFAULT_MODEL(),
+    maxTokens: 256,
+    usage:     {
+      operation:      'quiz_grade',
+      userId:         params.userId,
+      conversationId: params.conversationId,
+    },
+    messages: [{
+      role:    'user',
+      content: `Grade this quiz answer. Return ONLY valid JSON.
 
 Question: ${params.question}
 Expected answer: ${params.expectedAnswer}
@@ -118,40 +138,45 @@ Return:
 }
 
 Be generous — mark correct if the user captures the essential meaning even if not word-for-word.`,
-      },
-    ],
+    }],
   });
 
-  const raw = response.content[0].type === 'text' ? response.content[0].text : '{}';
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-
-  try {
-    const parsed = JSON.parse(cleaned);
-    return {
-      isCorrect: Boolean(parsed.isCorrect),
-      feedback:  String(parsed.feedback ?? ''),
-    };
-  } catch {
-    return { isCorrect: false, feedback: 'Unable to grade answer.' };
-  }
+  return data;
 }
 
-export async function generatePerformanceOverview(params: {
-  questions: Array<{ question: string; userAnswer: string | null; isCorrect: boolean | null; feedback: string | null }>;
+// Shared quiz-summary prompt used by both quiz systems. Callers map the
+// returned overview into their own response shape (and compute weak nuggets).
+export async function summarizeQuizPerformance(params: {
+  questions: Array<{
+    question: string;
+    userAnswer: string | null;
+    isCorrect: boolean | null;
+    feedback: string | null;
+  }>;
   score: number;
   maxScore: number;
-}): Promise<{ overview: string; weakNuggetIds: string[] }> {
+  userId?: string;
+  conversationId?: string;
+}): Promise<string> {
   const summary = params.questions.map((q, i) =>
     `Q${i + 1}: ${q.question}\nAnswer: ${q.userAnswer ?? '(no answer)'}\nCorrect: ${q.isCorrect ? 'Yes' : 'No'}\nFeedback: ${q.feedback ?? ''}`,
   ).join('\n\n');
 
-  const response = await client.messages.create({
-    model:      process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
-    max_tokens: 512,
-    messages:   [
-      {
-        role:    'user',
-        content: `The user scored ${params.score}/${params.maxScore} on a quiz. Write a 2-3 sentence performance overview.
+  const fallback = `You scored ${params.score} out of ${params.maxScore}.`;
+
+  const { data } = await callClaudeJSON({
+    schema:    OverviewSchema,
+    fallback:  { overview: fallback },
+    model:     DEFAULT_MODEL(),
+    maxTokens: 512,
+    usage:     {
+      operation:      'quiz_summary',
+      userId:         params.userId,
+      conversationId: params.conversationId,
+    },
+    messages: [{
+      role:    'user',
+      content: `The user scored ${params.score}/${params.maxScore} on a quiz. Write a 2-3 sentence performance overview.
 Be encouraging but honest. Highlight strengths and areas to revisit.
 
 Quiz results:
@@ -161,17 +186,18 @@ Return ONLY valid JSON:
 {
   "overview": "The performance summary text"
 }`,
-      },
-    ],
+    }],
   });
 
-  const raw = response.content[0].type === 'text' ? response.content[0].text : '{}';
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  return data.overview || fallback;
+}
 
-  try {
-    const parsed = JSON.parse(cleaned);
-    return { overview: String(parsed.overview ?? ''), weakNuggetIds: [] };
-  } catch {
-    return { overview: `You scored ${params.score} out of ${params.maxScore}.`, weakNuggetIds: [] };
-  }
+export async function generatePerformanceOverview(params: {
+  questions: Array<{ question: string; userAnswer: string | null; isCorrect: boolean | null; feedback: string | null }>;
+  score: number;
+  maxScore: number;
+  userId?: string;
+}): Promise<{ overview: string; weakNuggetIds: string[] }> {
+  const overview = await summarizeQuizPerformance(params);
+  return { overview, weakNuggetIds: [] };
 }

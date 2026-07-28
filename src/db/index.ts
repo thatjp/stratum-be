@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { Pool, type PoolClient } from 'pg';
 import fs from 'fs';
 import path from 'path';
+import { logger } from '../logger';
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -16,7 +17,7 @@ export const pool = new Pool({
 // Without this listener, an error on an *idle* client is emitted as an
 // unhandled 'error' event on the pool, which terminates the process.
 pool.on('error', (err: Error) => {
-  console.error({ event: 'pg_pool_error', err: err.message });
+  logger.error({ event: 'pg_pool_error', err: err.message });
 });
 
 // Arbitrary but stable key. Two instances booting at once would otherwise run
@@ -61,7 +62,7 @@ export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>)
     return result;
   } catch (err) {
     await client.query('ROLLBACK').catch((rollbackErr: unknown) =>
-      console.error({ event: 'tx_rollback_failed', err: String(rollbackErr) }),
+      logger.error({ event: 'tx_rollback_failed', err: String(rollbackErr) }),
     );
     throw err;
   } finally {
@@ -77,7 +78,7 @@ export async function resetStuckCaptures(): Promise<void> {
      WHERE processing_status = 'extracting'`,
   );
   if ((rowCount ?? 0) > 0) {
-    console.log({ event: 'stuck_captures_reset', count: rowCount });
+    logger.info({ event: 'stuck_captures_reset', count: rowCount });
   }
 }
 
@@ -87,6 +88,6 @@ export async function pruneExpiredTokens(): Promise<void> {
     `DELETE FROM refresh_tokens WHERE expires_at < NOW()`,
   );
   if ((rowCount ?? 0) > 0) {
-    console.log({ event: 'expired_tokens_pruned', count: rowCount });
+    logger.info({ event: 'expired_tokens_pruned', count: rowCount });
   }
 }

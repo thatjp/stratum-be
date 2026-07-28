@@ -1,11 +1,14 @@
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 
-const ACCESS_TTL  = '15m';
-const REFRESH_TTL = '90d';
+const ACCESS_TTL       = '15m';
+const REFRESH_TTL_DAYS = 90;
 
 export function signAccessToken(userId: string): string {
-  return jwt.sign({ userId }, process.env.JWT_SECRET!, { expiresIn: ACCESS_TTL, algorithm: 'HS256' });
+  return jwt.sign({ userId }, process.env.JWT_SECRET!, {
+    expiresIn: ACCESS_TTL,
+    algorithm: 'HS256',
+  });
 }
 
 export function signRefreshToken(): string {
@@ -14,6 +17,6 @@ export function signRefreshToken(): string {
 
 export function refreshTokenExpiry(): Date {
   const d = new Date();
-  d.setDate(d.getDate() + 90);
+  d.setDate(d.getDate() + REFRESH_TTL_DAYS);
   return d;
 }

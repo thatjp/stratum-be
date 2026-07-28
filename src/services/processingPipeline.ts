@@ -1,4 +1,5 @@
 import { pool, withTransaction } from '../db';
+import { logger } from '../logger';
 import * as captureStore from '../store/captures';
 import * as nuggetStore from '../store/nuggets';
 import { extractNuggets } from './extraction';
@@ -16,7 +17,7 @@ export async function processCapture(captureId: string): Promise<void> {
 
   const capture = rows[0];
   if (!capture) {
-    console.error({ event: 'process_capture_not_found', captureId });
+    logger.error({ event: 'process_capture_not_found', captureId });
     return;
   }
 
@@ -24,7 +25,7 @@ export async function processCapture(captureId: string): Promise<void> {
   // would be a race — two workers could both see 'pending' and both extract —
   // so claim the row with a single conditional UPDATE instead.
   if (!(await captureStore.claimCaptureForProcessing(captureId))) {
-    console.log({ event: 'process_capture_skipped', captureId, statusAtRead: capture.processing_status });
+    logger.info({ event: 'process_capture_skipped', captureId, statusAtRead: capture.processing_status });
     return;
   }
 
@@ -35,7 +36,9 @@ export async function processCapture(captureId: string): Promise<void> {
   }
 
   try {
-    const nuggets = await extractNuggets(text, capture.intent as string);
+    const nuggets = await extractNuggets(text, capture.intent as string, {
+      userId: capture.user_id as string,
+    });
 
     // One transaction for the whole capture: a malformed artifact partway
     // through would otherwise leave orphan nuggets behind while the capture
@@ -80,9 +83,9 @@ export async function processCapture(captureId: string): Promise<void> {
       );
     });
 
-    console.log({ event: 'process_capture_done', captureId, nuggetCount: nuggets.length });
+    logger.info({ event: 'process_capture_done', captureId, nuggetCount: nuggets.length });
   } catch (err) {
-    console.error({ event: 'process_capture_failed', captureId, err: String(err) });
+    logger.error({ event: 'process_capture_failed', captureId, err: String(err) });
     // Back to 'failed' so the claim above can pick it up again, then rethrow so
     // the queue records the failure and schedules a retry. Swallowing it here
     // would leave the job marked complete with nothing extracted.

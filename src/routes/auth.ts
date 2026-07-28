@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { isEmail } from 'validator';
+import { z } from 'zod';
 import * as store from '../store/users';
 import * as tokenStore from '../store/refreshTokens';
 import { hashPassword, verifyPassword } from '../services/authCrypto';
@@ -7,15 +7,36 @@ import { signAccessToken, signRefreshToken, refreshTokenExpiry } from '../servic
 import { requireAuth } from '../middleware/requireAuth';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { sendError } from '../middleware/sendError';
+import { validateBody } from '../middleware/validate';
 
 export const authRouter = Router();
 
-authRouter.post('/register', asyncHandler(async (req, res) => {
-  const { firstName, lastName, email, password } = req.body;
-  if (!firstName?.trim()) return sendError(res, 400, 'VALIDATION_ERROR', 'firstName is required');
-  if (!lastName?.trim())  return sendError(res, 400, 'VALIDATION_ERROR', 'lastName is required');
-  if (!email?.trim() || !isEmail(email)) return sendError(res, 400, 'VALIDATION_ERROR', 'valid email is required');
-  if (!password || password.length < 8)  return sendError(res, 400, 'VALIDATION_ERROR', 'password must be at least 8 characters');
+const RegisterSchema = z.object({
+  firstName: z.string().trim().min(1, 'firstName is required').max(100),
+  lastName:  z.string().trim().min(1, 'lastName is required').max(100),
+  email:     z.string().trim().email('valid email is required').max(254),
+  password:  z.string().min(8, 'password must be at least 8 characters').max(200),
+});
+
+const LoginSchema = z.object({
+  email:    z.string().trim().min(1, 'email is required').max(254),
+  password: z.string().min(1, 'password is required').max(200),
+});
+
+const RefreshSchema = z.object({
+  refreshToken: z.string().min(1, 'refreshToken is required'),
+});
+
+const UpdateMeSchema = z.object({
+  firstName: z.string().trim().min(1).max(100).optional(),
+  lastName:  z.string().trim().min(1).max(100).optional(),
+  email:     z.string().trim().email('valid email is required').max(254).optional(),
+}).refine((v) => v.firstName !== undefined || v.lastName !== undefined || v.email !== undefined, {
+  message: 'At least one field is required',
+});
+
+authRouter.post('/register', validateBody(RegisterSchema), asyncHandler(async (req, res) => {
+  const { firstName, lastName, email, password } = req.body as z.infer<typeof RegisterSchema>;
 
   let user;
   try {
@@ -33,10 +54,8 @@ authRouter.post('/register', asyncHandler(async (req, res) => {
   res.status(201).json({ user, token: accessToken, refreshToken });
 }));
 
-authRouter.post('/login', asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
-  if (!email?.trim()) return sendError(res, 400, 'VALIDATION_ERROR', 'email is required');
-  if (!password)      return sendError(res, 400, 'VALIDATION_ERROR', 'password is required');
+authRouter.post('/login', validateBody(LoginSchema), asyncHandler(async (req, res) => {
+  const { email, password } = req.body as z.infer<typeof LoginSchema>;
 
   // Run the comparison even when the lookup missed, so an unregistered email
   // and a wrong password take the same amount of time to reject.
@@ -53,9 +72,8 @@ authRouter.post('/login', asyncHandler(async (req, res) => {
   res.json({ user, token: accessToken, refreshToken });
 }));
 
-authRouter.post('/refresh', asyncHandler(async (req, res) => {
-  const { refreshToken } = req.body;
-  if (!refreshToken) return sendError(res, 400, 'VALIDATION_ERROR', 'refreshToken is required');
+authRouter.post('/refresh', validateBody(RefreshSchema), asyncHandler(async (req, res) => {
+  const { refreshToken } = req.body as z.infer<typeof RefreshSchema>;
 
   const record = await tokenStore.findAndDeleteRefreshToken(refreshToken);
   if (!record) return sendError(res, 401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
@@ -80,14 +98,12 @@ authRouter.get('/me', requireAuth, asyncHandler(async (_req, res) => {
   res.json({ user });
 }));
 
-authRouter.patch('/me', requireAuth, asyncHandler(async (req, res) => {
+authRouter.patch('/me', requireAuth, validateBody(UpdateMeSchema), asyncHandler(async (req, res) => {
+  const body = req.body as z.infer<typeof UpdateMeSchema>;
   const fields: Parameters<typeof store.updateUser>[1] = {};
-  if (req.body.firstName !== undefined) fields.firstName = String(req.body.firstName);
-  if (req.body.lastName  !== undefined) fields.lastName  = String(req.body.lastName);
-  if (req.body.email     !== undefined) {
-    if (!isEmail(String(req.body.email))) return sendError(res, 400, 'VALIDATION_ERROR', 'valid email is required');
-    fields.email = String(req.body.email);
-  }
+  if (body.firstName !== undefined) fields.firstName = body.firstName;
+  if (body.lastName  !== undefined) fields.lastName  = body.lastName;
+  if (body.email     !== undefined) fields.email     = body.email;
   let user;
   try {
     user = await store.updateUser(res.locals.userId!, fields);

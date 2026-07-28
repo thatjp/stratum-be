@@ -5,6 +5,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { pool } from './db';
+import { logger } from './logger';
 import { requireAuth, requireRole } from './middleware/requireAuth';
 import { sendError } from './middleware/sendError';
 import { authRouter } from './routes/auth';
@@ -96,7 +97,7 @@ app.get('/api/health', async (_req, res) => {
       return res.status(500).json({ status: 'degraded', missingEnv });
     }
     res.json({ status: 'ok' });
-  } catch (err) {
+  } catch {
     res.status(500).json({ status: 'degraded', error: 'database unreachable' });
   }
 });
@@ -124,7 +125,7 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
     return sendError(res, 400, 'INVALID_UPLOAD', err.message);
   }
 
-  console.error({ requestId: res.locals.requestId, path: req.path, err: err.message }, 'Unhandled error');
+  logger.error({ requestId: res.locals.requestId, path: req.path, err: err.message }, 'Unhandled error');
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred' } });
 });
 

@@ -1,5 +1,6 @@
 import { PgBoss, type Job } from 'pg-boss';
 import type { Queryable } from '../db';
+import { logger } from '../logger';
 import { processCapture } from '../services/processingPipeline';
 
 export const CAPTURE_QUEUE = 'capture.process';
@@ -26,7 +27,7 @@ export async function startQueue(): Promise<void> {
   // pg-boss surfaces polling and maintenance failures here. Without a listener
   // these are unhandled 'error' events, which would take the process down.
   instance.on('error', (err: Error) => {
-    console.error({ event: 'queue_error', err: err.message });
+    logger.error({ event: 'queue_error', err: err.message });
   });
 
   await instance.start();
@@ -52,7 +53,7 @@ export async function startQueue(): Promise<void> {
   );
 
   boss = instance;
-  console.log({ event: 'queue_started', queue: CAPTURE_QUEUE, concurrency: CAPTURE_CONCURRENCY });
+  logger.info({ event: 'queue_started', queue: CAPTURE_QUEUE, concurrency: CAPTURE_CONCURRENCY });
 }
 
 // Enqueue a capture for extraction. Pass the client of an open transaction as

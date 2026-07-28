@@ -188,8 +188,10 @@ export async function updateConversation(
   if (fields.quizState       !== undefined) { sets.push(`quiz_state = $${i++}`);       vals.push(fields.quizState === null ? null : JSON.stringify(fields.quizState)); }
 
   vals.push(id, userId);
+  const idParam = i;
+  const userParam = i + 1;
   const { rows } = await pool.query(
-    `UPDATE conversations SET ${sets.join(', ')} WHERE id = $${i++} AND user_id = $${i++} RETURNING ${CONVERSATION_COLS}`,
+    `UPDATE conversations SET ${sets.join(', ')} WHERE id = $${idParam} AND user_id = $${userParam} RETURNING ${CONVERSATION_COLS}`,
     vals,
   );
   return rows[0] ? rowToConversation(rows[0]) : null;
