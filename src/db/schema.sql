@@ -46,6 +46,9 @@ CREATE INDEX IF NOT EXISTS collections_user_id_idx ON collections(user_id);
 
 ALTER TABLE collections ADD COLUMN IF NOT EXISTS archived_at    TIMESTAMPTZ;
 ALTER TABLE collections ADD COLUMN IF NOT EXISTS ghost_synopsis TEXT;
+-- Explicit learning goal for this collection (required on create; nullable for legacy rows)
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS goal             TEXT;
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS goal_target_at   TIMESTAMPTZ;
 
 -- Sessions
 CREATE TABLE IF NOT EXISTS sessions (

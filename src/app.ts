@@ -19,6 +19,7 @@ import { graphRouter } from './routes/graph';
 import { retentionGraphRouter } from './routes/retentionGraph';
 import { nuggetLinksRouter } from './routes/nuggetLinks';
 import { adminRouter } from './routes/admin';
+import { homeRouter } from './routes/home';
 
 const app = express();
 
@@ -78,6 +79,7 @@ const apiLimiter = rateLimit({
 app.use('/api', ipLimiter);
 
 app.use('/api/auth',            authLimiter, authRouter);
+app.use('/api/home',            requireAuth, apiLimiter, homeRouter);
 app.use('/api/collections',     requireAuth, apiLimiter, collectionsRouter);
 app.use('/api/sessions',        requireAuth, apiLimiter, sessionsRouter);
 app.use('/api/artifacts',       requireAuth, apiLimiter, artifactsRouter);
