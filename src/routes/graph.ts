@@ -29,6 +29,8 @@ interface GraphEdge {
   target: string;
 }
 
+const NUGGET_DISPLAY_LIMIT = 1000;
+
 // ─── GET /graph ───────────────────────────────────────────────────────────────
 
 graphRouter.get('/', asyncHandler(async (req, res) => {
@@ -56,11 +58,17 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
       [userId],
     ),
     pool.query(
+      // One extra row so we can tell "exactly at the limit" from "more exist".
       `SELECT id, content AS title, NULL::text AS synopsis, created_at, collection_id
-       FROM nuggets WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1001`,
-      [userId],
+       FROM nuggets WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [userId, NUGGET_DISPLAY_LIMIT + 1],
     ),
   ]);
+
+  // Trim before building nodes and edges — trimming afterwards leaves the
+  // overflow row in the response while still reporting it as truncated.
+  const nuggetsTruncated  = nuggetRows.rows.length > NUGGET_DISPLAY_LIMIT;
+  const visibleNuggetRows = nuggetRows.rows.slice(0, NUGGET_DISPLAY_LIMIT);
 
   const nodes: GraphNode[] = [
     ...convRows.rows.map((r) => ({
@@ -95,7 +103,7 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
       createdAt: r.created_at as string,
       collectionId: null,
     })),
-    ...nuggetRows.rows.map((r) => ({
+    ...visibleNuggetRows.map((r) => ({
       id:        r.id as string,
       type:      'nugget' as const,
       label:     truncate(r.title as string, 60),
@@ -114,7 +122,7 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
     [userId],
   );
   // nugget → collection edges
-  const nuggetEdgeRows = nuggetRows.rows.filter((r) => r.collection_id != null);
+  const nuggetEdgeRows = visibleNuggetRows.filter((r) => r.collection_id != null);
 
   const edges: GraphEdge[] = [
     ...convEdgeRows.rows
@@ -124,10 +132,6 @@ graphRouter.get('/', asyncHandler(async (req, res) => {
       .filter((r) => nodeIds.has(r.collection_id as string))
       .map((r) => ({ source: r.id as string, target: r.collection_id as string })),
   ];
-
-  const NUGGET_DISPLAY_LIMIT = 1000;
-  const nuggetsTruncated = nuggetRows.rows.length > NUGGET_DISPLAY_LIMIT;
-  if (nuggetsTruncated) nuggetRows.rows.splice(NUGGET_DISPLAY_LIMIT);
 
   res.json({ nodes, edges, truncated: nuggetsTruncated });
 }));

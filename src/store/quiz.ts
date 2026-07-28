@@ -1,4 +1,4 @@
-import { pool } from '../db';
+import { pool, withTransaction } from '../db';
 
 export interface QuizSession {
   id: string;
@@ -93,32 +93,55 @@ export async function listQuizSessions(userId: string, collectionId?: string): P
   return rows.map(rowToSession);
 }
 
-export async function addQuizQuestion(params: {
-  quizSessionId: string;
-  nuggetId?: string | null;
-  artifactId?: string | null;
-  question: string;
-  expectedAnswer: string;
-}): Promise<QuizQuestion> {
-  const { rows } = await pool.query(
-    `INSERT INTO quiz_questions (quiz_session_id, nugget_id, artifact_id, question, expected_answer)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [params.quizSessionId, params.nuggetId ?? null, params.artifactId ?? null, params.question, params.expectedAnswer],
-  );
-  await pool.query(
-    `UPDATE quiz_sessions SET question_count = question_count + 1, max_score = max_score + 1 WHERE id = $1`,
-    [params.quizSessionId],
-  );
-  return rowToQuestion(rows[0]);
+// Inserts every question in one round trip and bumps the session counters once,
+// instead of two statements per question all contending on the same session row.
+export async function addQuizQuestions(
+  quizSessionId: string,
+  questions: Array<{
+    nuggetId?: string | null;
+    artifactId?: string | null;
+    question: string;
+    expectedAnswer: string;
+  }>,
+): Promise<QuizQuestion[]> {
+  if (!questions.length) return [];
+
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO quiz_questions (quiz_session_id, nugget_id, artifact_id, question, expected_answer)
+       SELECT $1, q.nugget_id, q.artifact_id, q.question, q.expected_answer
+       FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::text[])
+         AS q(nugget_id, artifact_id, question, expected_answer)
+       RETURNING *`,
+      [
+        quizSessionId,
+        questions.map((q) => q.nuggetId ?? null),
+        questions.map((q) => q.artifactId ?? null),
+        questions.map((q) => q.question),
+        questions.map((q) => q.expectedAnswer),
+      ],
+    );
+
+    await client.query(
+      `UPDATE quiz_sessions
+       SET question_count = question_count + $2, max_score = max_score + $2
+       WHERE id = $1`,
+      [quizSessionId, rows.length],
+    );
+
+    return rows.map(rowToQuestion);
+  });
 }
 
+// Ownership is enforced by the join rather than a preceding SELECT, so this is
+// one round trip instead of two. Returns [] for a session the user doesn't own.
 export async function getQuizQuestions(quizSessionId: string, userId: string): Promise<QuizQuestion[]> {
-  // Verify ownership
-  const session = await getQuizSession(quizSessionId, userId);
-  if (!session) return [];
   const { rows } = await pool.query(
-    `SELECT * FROM quiz_questions WHERE quiz_session_id = $1 ORDER BY created_at ASC`,
-    [quizSessionId],
+    `SELECT q.* FROM quiz_questions q
+     JOIN quiz_sessions s ON s.id = q.quiz_session_id
+     WHERE q.quiz_session_id = $1 AND s.user_id = $2
+     ORDER BY q.created_at ASC`,
+    [quizSessionId, userId],
   );
   return rows.map(rowToQuestion);
 }
@@ -131,27 +154,34 @@ export async function gradeQuestion(params: {
   isCorrect: boolean;
   feedback: string;
 }): Promise<QuizQuestion | null> {
-  // Verify ownership
-  const session = await getQuizSession(params.quizSessionId, params.userId);
-  if (!session) return null;
-
-  const { rows } = await pool.query(
-    `UPDATE quiz_questions
-     SET user_answer = $1, is_correct = $2, feedback = $3
-     WHERE id = $4 AND quiz_session_id = $5
-     RETURNING *`,
-    [params.userAnswer, params.isCorrect, params.feedback, params.questionId, params.quizSessionId],
-  );
-  if (!rows[0]) return null;
-
-  if (params.isCorrect) {
-    await pool.query(
-      `UPDATE quiz_sessions SET score = score + 1 WHERE id = $1`,
-      [params.quizSessionId],
+  return withTransaction(async (client) => {
+    // Ownership is part of the UPDATE's predicate, so no separate check is
+    // needed and the grade cannot be applied to someone else's question.
+    const { rows } = await client.query(
+      `UPDATE quiz_questions q
+       SET user_answer = $1, is_correct = $2, feedback = $3
+       FROM quiz_sessions s
+       WHERE q.id = $4
+         AND q.quiz_session_id = $5
+         AND s.id = q.quiz_session_id
+         AND s.user_id = $6
+       RETURNING q.*`,
+      [params.userAnswer, params.isCorrect, params.feedback,
+       params.questionId, params.quizSessionId, params.userId],
     );
-  }
+    if (!rows[0]) return null;
 
-  return rowToQuestion(rows[0]);
+    // Same transaction as the grade — otherwise a crash between the two leaves
+    // the question marked correct but the session score behind.
+    if (params.isCorrect) {
+      await client.query(
+        `UPDATE quiz_sessions SET score = score + 1 WHERE id = $1`,
+        [params.quizSessionId],
+      );
+    }
+
+    return rowToQuestion(rows[0]);
+  });
 }
 
 export async function completeQuizSession(params: {

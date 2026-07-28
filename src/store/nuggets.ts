@@ -1,4 +1,4 @@
-import { pool } from '../db';
+import { pool, type Queryable } from '../db';
 
 export interface Nugget {
   id: string;
@@ -29,8 +29,8 @@ export async function createNugget(input: {
   content: string;
   sourceText?: string;
   confidence?: number;
-}): Promise<Nugget> {
-  const { rows } = await pool.query(
+}, db: Queryable = pool): Promise<Nugget> {
+  const { rows } = await db.query(
     `INSERT INTO nuggets (capture_id, collection_id, user_id, content, source_text, confidence)
      VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING *`,
@@ -57,8 +57,8 @@ export async function createArtifact(input: {
   kind: string;
   front: string;
   back: string;
-}): Promise<Artifact> {
-  const { rows } = await pool.query(
+}, db: Queryable = pool): Promise<Artifact> {
+  const { rows } = await db.query(
     `INSERT INTO artifacts (nugget_id, user_id, kind, front, back)
      VALUES ($1, $2, $3, $4, $5)
      RETURNING *`,

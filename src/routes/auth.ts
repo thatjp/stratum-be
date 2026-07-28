@@ -38,11 +38,11 @@ authRouter.post('/login', asyncHandler(async (req, res) => {
   if (!email?.trim()) return sendError(res, 400, 'VALIDATION_ERROR', 'email is required');
   if (!password)      return sendError(res, 400, 'VALIDATION_ERROR', 'password is required');
 
+  // Run the comparison even when the lookup missed, so an unregistered email
+  // and a wrong password take the same amount of time to reject.
   const auth = await store.getUserAuthByEmail(email);
-  if (!auth) return sendError(res, 401, 'INVALID_CREDENTIALS', 'Invalid email or password');
-
-  const ok = await verifyPassword(password, auth.passwordHash);
-  if (!ok)   return sendError(res, 401, 'INVALID_CREDENTIALS', 'Invalid email or password');
+  const ok   = await verifyPassword(password, auth?.passwordHash);
+  if (!auth || !ok) return sendError(res, 401, 'INVALID_CREDENTIALS', 'Invalid email or password');
 
   const user = await store.getUserById(auth.id);
   if (!user) return sendError(res, 401, 'INVALID_CREDENTIALS', 'Invalid email or password');

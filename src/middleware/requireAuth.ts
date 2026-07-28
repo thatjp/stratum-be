@@ -15,7 +15,9 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   }
   const token = header.slice(7);
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET!) as TokenPayload;
+    // Pin the algorithm — without it, verify accepts any algorithm the token
+    // header names, which is the shape of the classic JWT confusion attacks.
+    const payload = jwt.verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] }) as TokenPayload;
     res.locals.userId = payload.userId;
     next();
   } catch {

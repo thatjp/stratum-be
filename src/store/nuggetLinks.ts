@@ -25,8 +25,15 @@ export interface LinkedNoteView {
 // A link's identity is unordered, but the row is stored with the smaller id
 // first (see the `nugget_links_ordered` CHECK constraint) so a pair is never
 // stored twice regardless of which nugget initiated the link.
+//
+// Postgres compares UUIDs by their parsed bytes, so the ordering has to be done
+// on a canonical lowercase form. Comparing the raw input as JS strings puts
+// 'A' (65) before 'a' (97) and can disagree with the CHECK constraint whenever
+// the two ids differ in case.
 function orderedPair(nuggetId: string, targetNuggetId: string): [string, string] {
-  return nuggetId < targetNuggetId ? [nuggetId, targetNuggetId] : [targetNuggetId, nuggetId];
+  const a = nuggetId.toLowerCase();
+  const b = targetNuggetId.toLowerCase();
+  return a < b ? [a, b] : [b, a];
 }
 
 function mapRow(r: any): NuggetLink {

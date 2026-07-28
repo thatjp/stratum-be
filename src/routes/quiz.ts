@@ -39,17 +39,7 @@ quizRouter.post('/', asyncHandler(async (req, res) => {
     return sendError(res, 422, 'INSUFFICIENT_CONTENT', 'Not enough content to generate quiz questions. Add more captures first.');
   }
 
-  const questions = await Promise.all(
-    generated.map((q) =>
-      quizStore.addQuizQuestion({
-        quizSessionId:  session.id,
-        nuggetId:       q.nuggetId,
-        artifactId:     q.artifactId,
-        question:       q.question,
-        expectedAnswer: q.expectedAnswer,
-      }),
-    ),
-  );
+  const questions = await quizStore.addQuizQuestions(session.id, generated);
 
   res.status(201).json({ session, questions });
 }));

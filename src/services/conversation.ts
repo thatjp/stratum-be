@@ -540,15 +540,10 @@ export async function maybeSynopsize(
   // Write synopsis first — if this fails, messages are still intact
   await convStore.updateConversation(conversationId, userId, { synopsis });
 
-  // Only delete after the synopsis is safely persisted
+  // Only delete after the synopsis is safely persisted. message_count is
+  // decremented by the messages_count_delete trigger.
   const ids = toCompress.map((m) => m.id);
   if (ids.length) {
     await pool.query(`DELETE FROM messages WHERE id = ANY($1::uuid[])`, [ids]);
-    await pool.query(
-      `UPDATE conversations
-       SET message_count = (SELECT COUNT(*) FROM messages WHERE conversation_id = $1)
-       WHERE id = $1`,
-      [conversationId],
-    );
   }
 }

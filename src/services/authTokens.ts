@@ -5,7 +5,7 @@ const ACCESS_TTL  = '15m';
 const REFRESH_TTL = '90d';
 
 export function signAccessToken(userId: string): string {
-  return jwt.sign({ userId }, process.env.JWT_SECRET!, { expiresIn: ACCESS_TTL });
+  return jwt.sign({ userId }, process.env.JWT_SECRET!, { expiresIn: ACCESS_TTL, algorithm: 'HS256' });
 }
 
 export function signRefreshToken(): string {

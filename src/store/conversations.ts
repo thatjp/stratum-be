@@ -255,15 +255,9 @@ export async function addMessage(params: {
     [params.conversationId, params.role, params.content, params.tokenCount ?? null,
      params.metadata ? JSON.stringify(params.metadata) : null],
   );
-  // Derive message_count from the actual row count so concurrent inserts and
-  // synopsis deletions never cause the counter to drift.
-  await pool.query(
-    `UPDATE conversations
-     SET message_count = (SELECT COUNT(*) FROM messages WHERE conversation_id = $1),
-         updated_at    = NOW()
-     WHERE id = $1`,
-    [params.conversationId],
-  );
+  // message_count and updated_at are maintained by the messages_count_insert
+  // trigger, in the same transaction as the insert above — so they can't drift
+  // and we don't pay a COUNT(*) over the whole thread on every message.
   return rowToMessage(rows[0]);
 }
 

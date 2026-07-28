@@ -4,7 +4,9 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { pool } from './db';
 import { requireAuth, requireRole } from './middleware/requireAuth';
+import { sendError } from './middleware/sendError';
 import { authRouter } from './routes/auth';
 import { collectionsRouter } from './routes/collections';
 import { sessionsRouter } from './routes/sessions';
@@ -50,8 +52,19 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Authenticated API routes: key by userId so one account can't starve others,
-// fall back to IP for unauthenticated requests that slip through.
+// Coarse per-IP backstop applied to everything under /api. Deliberately
+// generous — its only job is to bound unauthenticated floods, since requests
+// that fail requireAuth never reach the per-user limiter below.
+const ipLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Authenticated API routes: key by userId so one account can't starve others.
+// Must be mounted *after* requireAuth, otherwise res.locals.userId is always
+// undefined and every user collapses into a single per-IP bucket.
 const apiLimiter = rateLimit({
   windowMs: 60_000,
   max: 200,
@@ -61,21 +74,23 @@ const apiLimiter = rateLimit({
     (req.res?.locals.userId as string | undefined) ?? ipKeyGenerator(req.ip ?? 'unknown'),
 });
 
-app.use('/api/auth',           authLimiter, authRouter);
-app.use('/api/collections',    apiLimiter, requireAuth, collectionsRouter);
-app.use('/api/sessions',       apiLimiter, requireAuth, sessionsRouter);
-app.use('/api/artifacts',      apiLimiter, requireAuth, artifactsRouter);
-app.use('/api/review',         apiLimiter, requireAuth, reviewRouter);
-app.use('/api/conversations',  apiLimiter, requireAuth, conversationsRouter);
-app.use('/api/quiz',           apiLimiter, requireAuth, quizRouter);
-app.use('/api/graph',           apiLimiter, requireAuth, graphRouter);
-app.use('/api/retention-graph', apiLimiter, requireAuth, retentionGraphRouter);
-app.use('/api/nuggets',         apiLimiter, requireAuth, nuggetLinksRouter);
-app.use('/api/admin',           apiLimiter, requireAuth, requireRole('admin', 'support'), adminRouter);
+app.use('/api', ipLimiter);
+
+app.use('/api/auth',            authLimiter, authRouter);
+app.use('/api/collections',     requireAuth, apiLimiter, collectionsRouter);
+app.use('/api/sessions',        requireAuth, apiLimiter, sessionsRouter);
+app.use('/api/artifacts',       requireAuth, apiLimiter, artifactsRouter);
+app.use('/api/review',          requireAuth, apiLimiter, reviewRouter);
+app.use('/api/conversations',   requireAuth, apiLimiter, conversationsRouter);
+app.use('/api/quiz',            requireAuth, apiLimiter, quizRouter);
+app.use('/api/graph',           requireAuth, apiLimiter, graphRouter);
+app.use('/api/retention-graph', requireAuth, apiLimiter, retentionGraphRouter);
+app.use('/api/nuggets',         requireAuth, apiLimiter, nuggetLinksRouter);
+app.use('/api/admin',           requireAuth, apiLimiter, requireRole('admin', 'support'), adminRouter);
 
 app.get('/api/health', async (_req, res) => {
   try {
-    await import('./db').then(({ pool }) => pool.query('SELECT 1'));
+    await pool.query('SELECT 1');
     const missingEnv = ['JWT_SECRET', 'ANTHROPIC_API_KEY', 'DATABASE_URL'].filter((k) => !process.env[k]);
     if (missingEnv.length) {
       return res.status(500).json({ status: 'degraded', missingEnv });
@@ -86,7 +101,29 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found' } });
+});
+
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  // Handlers that respond before doing background work can still throw afterwards.
+  // Writing a second response here would throw ERR_HTTP_HEADERS_SENT and mask the
+  // original error, so hand those off to Express's default handler instead.
+  if (res.headersSent) return next(err);
+
+  // Postgres raises 22P02 for a malformed input literal, which in practice means
+  // a bad UUID in a path param. That's a client error, so don't log it as an
+  // outage or report it as a 500.
+  if ((err as { code?: string }).code === '22P02') {
+    return sendError(res, 400, 'INVALID_ID', 'Malformed identifier in request');
+  }
+
+  // Oversized or malformed multipart bodies surface as MulterError. Matched by
+  // name so this file doesn't need to import multer.
+  if (err.name === 'MulterError') {
+    return sendError(res, 400, 'INVALID_UPLOAD', err.message);
+  }
+
   console.error({ requestId: res.locals.requestId, path: req.path, err: err.message }, 'Unhandled error');
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred' } });
 });

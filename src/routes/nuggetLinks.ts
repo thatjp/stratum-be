@@ -31,8 +31,11 @@ nuggetLinksRouter.get('/:id/links', asyncHandler(async (req, res) => {
 // Body: { targetNuggetId, note?, source? }
 nuggetLinksRouter.post('/:id/links', asyncHandler(async (req, res) => {
   const userId         = res.locals.userId!;
-  const nuggetId        = String(req.params.id);
-  const targetNuggetId  = String(req.body.targetNuggetId ?? '');
+  // Lowercased so the self-link check below compares canonical forms — Postgres
+  // treats 'AB…' and 'ab…' as the same UUID, and a mismatch here would slip
+  // past this guard only to trip the nugget_links_no_self_link constraint.
+  const nuggetId        = String(req.params.id).toLowerCase();
+  const targetNuggetId  = String(req.body.targetNuggetId ?? '').toLowerCase();
   const note            = req.body.note ? String(req.body.note) : undefined;
   const source          = req.body.source === 'ai_suggested' ? 'ai_suggested' : 'manual';
 

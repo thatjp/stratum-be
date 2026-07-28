@@ -96,6 +96,10 @@ CREATE TABLE IF NOT EXISTS nuggets (
 CREATE INDEX IF NOT EXISTS nuggets_collection_id_idx ON nuggets(collection_id);
 CREATE INDEX IF NOT EXISTS nuggets_user_id_idx ON nuggets(user_id);
 
+-- Session artifact/nugget counts and getArtifactsForSession all walk
+-- captures -> nuggets on this column.
+CREATE INDEX IF NOT EXISTS nuggets_capture_id_idx ON nuggets(capture_id);
+
 -- Artifacts
 CREATE TABLE IF NOT EXISTS artifacts (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -117,6 +121,26 @@ CREATE INDEX IF NOT EXISTS artifacts_user_id_idx ON artifacts(user_id);
 CREATE INDEX IF NOT EXISTS artifacts_due_at_idx ON artifacts(user_id, due_at)
   WHERE status = 'accepted';
 
+-- Every nugget -> artifact join (retention graph, session artifacts, quiz
+-- generation, duplicate-card checks) needs this; without it they seq scan.
+CREATE INDEX IF NOT EXISTS artifacts_nugget_id_idx ON artifacts(nugget_id);
+
+-- Admin moderation queue.
+CREATE INDEX IF NOT EXISTS artifacts_pending_review_idx ON artifacts(created_at)
+  WHERE status = 'pending_review';
+
+-- Earlier versions grew ease_factor and interval_days without an upper bound,
+-- which could push a card's schedule far enough out that it was effectively
+-- unreviewable. Pull any such rows back into the range the SM-2 code now
+-- enforces. Idempotent: a no-op once every row is in range.
+UPDATE artifacts
+SET ease_factor   = LEAST(ease_factor, 2.5),
+    interval_days = LEAST(interval_days, 365),
+    due_at        = LEAST(due_at, NOW() + INTERVAL '365 days')
+WHERE ease_factor > 2.5
+   OR interval_days > 365
+   OR due_at > NOW() + INTERVAL '365 days';
+
 -- Recall attempts
 CREATE TABLE IF NOT EXISTS recall_attempts (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -128,6 +152,11 @@ CREATE TABLE IF NOT EXISTS recall_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS recall_attempts_artifact_id_idx ON recall_attempts(artifact_id);
+
+-- Backs the review stats query and the streak window, both of which scan a
+-- user's attempts by time.
+CREATE INDEX IF NOT EXISTS recall_attempts_user_attempted_idx
+  ON recall_attempts(user_id, attempted_at DESC);
 
 -- Device tokens (push notifications)
 CREATE TABLE IF NOT EXISTS device_tokens (
@@ -164,6 +193,12 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE INDEX IF NOT EXISTS conversations_user_id_idx ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS conversations_collection_id_idx ON conversations(collection_id);
 
+-- The conversation list filters on archived_at and paginates on updated_at, so
+-- a partial index covering both serves the whole query.
+CREATE INDEX IF NOT EXISTS conversations_user_updated_idx
+  ON conversations(user_id, updated_at DESC)
+  WHERE archived_at IS NULL;
+
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS archived_at    TIMESTAMPTZ;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ghost_synopsis TEXT;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_titled    BOOLEAN NOT NULL DEFAULT FALSE;
@@ -191,6 +226,59 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS metadata JSONB;
 
 CREATE INDEX IF NOT EXISTS messages_conversation_id_idx ON messages(conversation_id);
 
+-- Messages are always read newest-first within a conversation and paginated on
+-- created_at, so the composite serves both the filter and the ordering.
+CREATE INDEX IF NOT EXISTS messages_conversation_created_idx
+  ON messages(conversation_id, created_at DESC);
+
+-- conversations.message_count is maintained by trigger rather than recomputed
+-- with COUNT(*) on every insert, which made each write O(messages in thread).
+-- Statement-level with transition tables so bulk deletes (synopsis compression
+-- drops hundreds of rows at once) cost one UPDATE instead of one per row.
+CREATE OR REPLACE FUNCTION conversations_sync_message_count() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    UPDATE conversations c
+    SET message_count = c.message_count + d.n,
+        updated_at    = NOW()
+    FROM (SELECT conversation_id, COUNT(*)::int AS n FROM new_rows GROUP BY conversation_id) d
+    WHERE c.id = d.conversation_id;
+  ELSE
+    -- Deletions come from synopsis compression, which shouldn't reorder the
+    -- conversation list, so updated_at is deliberately left alone here.
+    UPDATE conversations c
+    SET message_count = GREATEST(c.message_count - d.n, 0)
+    FROM (SELECT conversation_id, COUNT(*)::int AS n FROM old_rows GROUP BY conversation_id) d
+    WHERE c.id = d.conversation_id;
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS messages_count_insert ON messages;
+CREATE TRIGGER messages_count_insert
+  AFTER INSERT ON messages
+  REFERENCING NEW TABLE AS new_rows
+  FOR EACH STATEMENT EXECUTE FUNCTION conversations_sync_message_count();
+
+DROP TRIGGER IF EXISTS messages_count_delete ON messages;
+CREATE TRIGGER messages_count_delete
+  AFTER DELETE ON messages
+  REFERENCING OLD TABLE AS old_rows
+  FOR EACH STATEMENT EXECUTE FUNCTION conversations_sync_message_count();
+
+-- Reconcile any drift left by the previous COUNT(*) approach before the trigger
+-- took over. Idempotent, and a no-op once counts agree.
+UPDATE conversations c
+SET message_count = m.n
+FROM (
+  SELECT c2.id, COUNT(msg.id)::int AS n
+  FROM conversations c2
+  LEFT JOIN messages msg ON msg.conversation_id = c2.id
+  GROUP BY c2.id
+) m
+WHERE c.id = m.id AND c.message_count <> m.n;
+
 -- Quiz sessions
 CREATE TABLE IF NOT EXISTS quiz_sessions (
   id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -208,6 +296,7 @@ CREATE TABLE IF NOT EXISTS quiz_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS quiz_sessions_user_id_idx ON quiz_sessions(user_id);
+CREATE INDEX IF NOT EXISTS quiz_sessions_user_created_idx ON quiz_sessions(user_id, created_at DESC);
 
 -- Quiz questions
 CREATE TABLE IF NOT EXISTS quiz_questions (
@@ -239,6 +328,10 @@ CREATE TABLE IF NOT EXISTS token_usage (
 
 CREATE INDEX IF NOT EXISTS token_usage_user_id_idx     ON token_usage(user_id);
 CREATE INDEX IF NOT EXISTS token_usage_created_at_idx  ON token_usage(user_id, created_at);
+
+-- The admin usage endpoints aggregate across all users filtered only by time,
+-- which the user-leading index above cannot serve.
+CREATE INDEX IF NOT EXISTS token_usage_created_at_only_idx ON token_usage(created_at);
 
 -- Nugget links (Zettelkasten-style cross-references between atomic notes).
 -- Undirected: nugget_a_id/nugget_b_id are ordered LEAST/GREATEST at write time
