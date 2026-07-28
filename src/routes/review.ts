@@ -12,8 +12,21 @@ reviewRouter.get('/stats', asyncHandler(async (_req, res) => {
 
 reviewRouter.get('/due', asyncHandler(async (req, res) => {
   const limit = Math.min(parseInt(String(req.query.limit ?? '20'), 10), 50);
-  const artifacts = await reviewStore.getDueArtifacts(res.locals.userId!, limit);
-  res.json({ artifacts });
+  const collectionId = req.query.collectionId
+    ? String(req.query.collectionId)
+    : undefined;
+
+  // Soft UUID shape check — malformed IDs become a clean 400 instead of a PG error.
+  if (collectionId && !/^[0-9a-f-]{36}$/i.test(collectionId)) {
+    return sendError(res, 400, 'VALIDATION_ERROR', 'invalid collectionId');
+  }
+
+  const artifacts = await reviewStore.getDueArtifacts(
+    res.locals.userId!,
+    limit,
+    collectionId,
+  );
+  res.json({ artifacts, collectionId: collectionId ?? null });
 }));
 
 reviewRouter.post('/recall-attempts', asyncHandler(async (req, res) => {

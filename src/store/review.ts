@@ -46,7 +46,20 @@ function rowToReviewArtifact(r: Record<string, unknown>): ReviewArtifact {
   };
 }
 
-export async function getDueArtifacts(userId: string, limit = 20): Promise<ReviewArtifact[]> {
+export async function getDueArtifacts(
+  userId: string,
+  limit = 20,
+  collectionId?: string,
+): Promise<ReviewArtifact[]> {
+  const params: unknown[] = [userId];
+  let collectionFilter = '';
+  if (collectionId) {
+    params.push(collectionId);
+    collectionFilter = `AND col.id = $${params.length}`;
+  }
+  params.push(limit);
+  const limitParam = `$${params.length}`;
+
   const { rows } = await pool.query(
     `SELECT a.*, col.id AS collection_id, col.title AS collection_title
      FROM artifacts a
@@ -54,10 +67,12 @@ export async function getDueArtifacts(userId: string, limit = 20): Promise<Revie
      JOIN collections col ON n.collection_id = col.id
      WHERE a.user_id = $1
        AND a.status = 'accepted'
+       AND col.archived_at IS NULL
        AND (a.due_at IS NULL OR a.due_at <= NOW())
+       ${collectionFilter}
      ORDER BY a.due_at ASC NULLS FIRST
-     LIMIT $2`,
-    [userId, limit],
+     LIMIT ${limitParam}`,
+    params,
   );
   return rows.map(rowToReviewArtifact);
 }
